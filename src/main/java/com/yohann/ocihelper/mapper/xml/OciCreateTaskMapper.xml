@@ -14,7 +14,9 @@
         oct.interval,
         oct.create_numbers,
         oct.operation_system,
+        oct.root_password,
         oct.create_time,
+        oct.paused,
         ou.username
         from oci_create_task oct
         left join oci_user ou on oct.user_id = ou.id
@@ -24,7 +26,8 @@
             </if>
             <if test="keyword != null and keyword != ''">
                 and ou.username like '%' || #{keyword} || '%' or
-                ou.oci_region like '%' || #{keyword} || '%'
+                ou.oci_region like '%' || #{keyword} || '%' or
+                oct.architecture like '%' || #{keyword} || '%'
             </if>
         </where>
         order by ou.username, oct.create_time DESC limit #{offset}, #{size}
@@ -39,7 +42,8 @@
             </if>
             <if test="keyword != null and keyword != ''">
                 and ou.username like '%' || #{keyword} || '%' or
-                ou.oci_region like '%' || #{keyword} || '%'
+                ou.oci_region like '%' || #{keyword} || '%' or
+                oct.architecture like '%' || #{keyword} || '%'
             </if>
         </where>
     </select>

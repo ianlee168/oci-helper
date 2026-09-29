@@ -18,10 +18,15 @@ public interface OciUserMapper extends BaseMapper<OciUser> {
     List<OciUserListRsp> userPage(@Param("offset") long offset,
                                   @Param("size") long size,
                                   @Param("keyword") String keyword,
-                                  @Param("enableTask") Integer enableTask);
+                                  @Param("enableTask") Integer enableTask,
+                                  @Param("planType") String planType,
+                                  @Param("accountStatus") String accountStatus,
+                                  @Param("sortOrder") String sortOrder);
 
     Long userPageTotal(@Param("keyword") String keyword,
-                       @Param("enableTask") Integer enableTask);
+                       @Param("enableTask") Integer enableTask,
+                       @Param("planType") String planType,
+                       @Param("accountStatus") String accountStatus);
 }
 
 

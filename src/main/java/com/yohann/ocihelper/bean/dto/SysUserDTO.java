@@ -20,15 +20,17 @@ public class SysUserDTO {
     private String taskId;
     private OciCfg ociCfg;
     private String username;
+    private String planType;
     private float ocpus = 1F;
     private float memory = 6F;
-    private Long disk = 50L;
+    private Long disk;
     private String architecture = "ARM";
     private Long interval = 60L;
     private volatile int createNumbers = 0;
     private String rootPassword;
     private String operationSystem = "Ubuntu";
     private List<CloudInstance> instanceList;
+    private boolean joinChannelBroadcast = true;
 
     @Data
     @Builder
@@ -39,6 +41,8 @@ public class SysUserDTO {
         private String privateKeyPath;
         private String region;
         private String compartmentId;
+        /** 代理地址，例如 http://host:port 或 socks5://host:port */
+        private String proxy;
     }
 
     @Builder

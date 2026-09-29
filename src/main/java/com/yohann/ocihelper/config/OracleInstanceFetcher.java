@@ -16,11 +16,37 @@ import com.oracle.bmc.identity.IdentityClient;
 import com.oracle.bmc.identity.model.*;
 import com.oracle.bmc.identity.requests.*;
 import com.oracle.bmc.identity.responses.*;
+import com.oracle.bmc.identitydomains.IdentityDomainsClient;
+import com.oracle.bmc.identitydomains.model.Users;
+import com.oracle.bmc.identitydomains.requests.ListUsersRequest;
+import com.oracle.bmc.identitydomains.responses.ListUsersResponse;
 import com.oracle.bmc.model.BmcException;
+import com.oracle.bmc.limits.LimitsClient;
+import com.oracle.bmc.limits.model.LimitDefinitionSummary;
+import com.oracle.bmc.limits.model.LimitValueSummary;
+import com.oracle.bmc.limits.model.ResourceAvailability;
+import com.oracle.bmc.limits.requests.GetResourceAvailabilityRequest;
+import com.oracle.bmc.limits.requests.ListLimitDefinitionsRequest;
+import com.oracle.bmc.limits.requests.ListLimitValuesRequest;
+import com.oracle.bmc.limits.responses.GetResourceAvailabilityResponse;
+import com.oracle.bmc.limits.responses.ListLimitDefinitionsResponse;
+import com.oracle.bmc.limits.model.ServiceSummary;
+import com.oracle.bmc.limits.requests.ListServicesRequest;
+import com.oracle.bmc.limits.responses.ListLimitValuesResponse;
+import com.oracle.bmc.limits.responses.ListServicesResponse;
 import com.oracle.bmc.monitoring.MonitoringClient;
+import com.oracle.bmc.networkloadbalancer.NetworkLoadBalancerClient;
+import com.oracle.bmc.ospgateway.SubscriptionServiceClient;
+import com.oracle.bmc.ospgateway.model.Subscription;
+import com.oracle.bmc.ospgateway.model.SubscriptionSummary;
+import com.oracle.bmc.ospgateway.requests.GetSubscriptionRequest;
+import com.oracle.bmc.ospgateway.requests.ListSubscriptionsRequest;
+import com.oracle.bmc.ospgateway.responses.GetSubscriptionResponse;
+import com.oracle.bmc.ospgateway.responses.ListSubscriptionsResponse;
+import com.oracle.bmc.usageapi.UsageapiClient;
 import com.oracle.bmc.workrequests.WorkRequestClient;
-import com.yohann.ocihelper.bean.Tuple2;
 import com.yohann.ocihelper.bean.constant.CacheConstant;
+import com.yohann.ocihelper.bean.constant.OciInstanceConstant;
 import com.yohann.ocihelper.bean.dto.InstanceCfgDTO;
 import com.yohann.ocihelper.bean.dto.InstanceDetailDTO;
 import com.yohann.ocihelper.bean.dto.SysUserDTO;
@@ -29,6 +55,9 @@ import com.yohann.ocihelper.bean.response.oci.cfg.OciCfgDetailsRsp;
 import com.yohann.ocihelper.enums.*;
 import com.yohann.ocihelper.exception.OciException;
 import com.yohann.ocihelper.utils.CommonUtils;
+import com.yohann.ocihelper.utils.ProxyUtils;
+import com.oracle.bmc.http.client.StandardClientProperties;
+import com.oracle.bmc.http.client.ProxyConfiguration;
 import com.yohann.ocihelper.utils.CustomExpiryGuavaCache;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
@@ -59,8 +88,15 @@ public class OracleInstanceFetcher implements Closeable {
     private final VirtualNetworkClient virtualNetworkClient;
     private final BlockstorageClient blockstorageClient;
     private final MonitoringClient monitoringClient;
+    private final NetworkLoadBalancerClient networkLoadBalancerClient;
+    private final IdentityDomainsClient identityDomainsClient;
+    private final LimitsClient limitsClient;
+    private final UsageapiClient usageapiClient;
+    private final SimpleAuthenticationDetailsProvider provider;
     private SysUserDTO user;
     private String compartmentId;
+    /** 当前实例使用的代理配置，null 表示直连 */
+    private ProxyConfiguration proxyCfg;
 
     private static final String CIDR_BLOCK = "10.0.0.0/16";
 
@@ -72,6 +108,10 @@ public class OracleInstanceFetcher implements Closeable {
         virtualNetworkClient.close();
         blockstorageClient.close();
         monitoringClient.close();
+        networkLoadBalancerClient.close();
+        identityDomainsClient.close();
+        limitsClient.close();
+        usageapiClient.close();
     }
 
     public OracleInstanceFetcher(SysUserDTO user) {
@@ -97,13 +137,135 @@ public class OracleInstanceFetcher implements Closeable {
                 .region(Region.valueOf(ociCfg.getRegion()))
                 .build();
 
-        identityClient = IdentityClient.builder().build(provider);
-        computeClient = ComputeClient.builder().build(provider);
-        blockstorageClient = BlockstorageClient.builder().build(provider);
-        workRequestClient = WorkRequestClient.builder().build(provider);
-        virtualNetworkClient = VirtualNetworkClient.builder().build(provider);
-        monitoringClient = MonitoringClient.builder().build(provider);
+        // 解析代理配置（仅使用配置专属代理，不使用全局代理）
+        ProxyConfiguration proxyCfg = ProxyUtils.parseProxy(ociCfg.getProxy());
+
+        identityClient = applyProxy(IdentityClient.builder(), proxyCfg).build(provider);
+        computeClient = applyProxy(ComputeClient.builder(), proxyCfg).build(provider);
+        blockstorageClient = applyProxy(BlockstorageClient.builder(), proxyCfg).build(provider);
+        workRequestClient = applyProxy(WorkRequestClient.builder(), proxyCfg).build(provider);
+        virtualNetworkClient = applyProxy(VirtualNetworkClient.builder(), proxyCfg).build(provider);
+        monitoringClient = applyProxy(MonitoringClient.builder(), proxyCfg).build(provider);
+        networkLoadBalancerClient = applyProxy(NetworkLoadBalancerClient.builder(), proxyCfg).build(provider);
+        identityDomainsClient = applyProxy(IdentityDomainsClient.builder(), proxyCfg).build(provider);
+        limitsClient = applyProxy(LimitsClient.builder(), proxyCfg).build(provider);
+        usageapiClient = applyProxy(UsageapiClient.builder(), proxyCfg).build(provider);
+        this.provider = provider;
+        this.proxyCfg = proxyCfg;
         compartmentId = StrUtil.isBlank(ociCfg.getCompartmentId()) ? findRootCompartment(identityClient, provider.getTenantId()) : ociCfg.getCompartmentId();
+    }
+
+    /**
+     * 为 OCI 客户端 Builder 设置代理，proxyCfg 为 null 时直接返回原 builder。
+     */
+    @SuppressWarnings("unchecked")
+    private static <B extends com.oracle.bmc.common.ClientBuilderBase<B, ?>> B applyProxy(B builder, ProxyConfiguration proxyCfg) {
+        if (proxyCfg != null) {
+            builder.clientConfigurator(httpClientBuilder ->
+                    httpClientBuilder.property(StandardClientProperties.PROXY, proxyCfg));
+        }
+        return builder;
+    }
+
+    /**
+     * 创建一个绑定到指定 endpoint 的独立 {@link IdentityDomainsClient}。
+     * 调用方负责关闭返回的客户端。
+     * 并发场景下请使用此方法代替 {@link #getIdentityDomainsClient()}，避免共享客户端的 endpoint 竞争问题。
+     */
+    public IdentityDomainsClient newIdentityDomainsClient(String endpoint) {
+        IdentityDomainsClient client = applyProxy(IdentityDomainsClient.builder(), proxyCfg).build(provider);
+        client.setEndpoint(endpoint);
+        return client;
+    }
+
+    /**
+     * Reset the console (UI) password for the given user.
+     *
+     * <p>Strategy:
+     * <ol>
+     *   <li>Try the classic Identity API {@code CreateOrResetUIPassword} first.
+     *       This works for <b>classic (non-federated) IAM users</b> and only requires a
+     *       standard tenant-administrator API Key.</li>
+     *   <li>If the classic API returns 404 (user not found in classic IAM, i.e. the account
+     *       is a pure Identity Domain user), fall back to the Identity Domains
+     *       {@code PutUserPasswordChanger} SCIM endpoint, which requires the API Key owner to
+     *       hold the <b>User Administrator</b> application role in the Identity Domain.</li>
+     * </ol>
+     *
+     * @param classicUserId the Classic Identity OCID of the target user (ocid1.user.oc1..)
+     * @return the newly generated password
+     */
+    public String resetUserPassword(String classicUserId) {
+        // --- Attempt 1: classic IAM API (works for non-Identity-Domain users) ---
+        try {
+            CreateOrResetUIPasswordResponse response = identityClient.createOrResetUIPassword(
+                    CreateOrResetUIPasswordRequest.builder()
+                            .userId(classicUserId)
+                            .build());
+            String newPassword = response.getUIPassword().getPassword();
+            log.info("用户:[{}],区域:[{}],成功通过经典 API 重置用户:[{}]的登录密码",
+                    user.getUsername(), user.getOciCfg().getRegion(), classicUserId);
+            return newPassword;
+        } catch (com.oracle.bmc.model.BmcException e) {
+            // 404 means the user exists only in Identity Domains (new-style tenancy)
+            // 400 with "notSupported" also indicates an Identity Domain-only user
+            if (e.getStatusCode() != 404 && e.getStatusCode() != 400) {
+                throw e;
+            }
+            log.info("用户:[{}],区域:[{}],经典 API 不支持该用户,尝试 Identity Domains API...",
+                    user.getUsername(), user.getOciCfg().getRegion());
+        }
+
+        // --- Attempt 2: Identity Domains SCIM API (new-style tenancy users) ---
+        String tenantId = user.getOciCfg().getTenantId();
+        String domainUrl = com.yohann.ocihelper.utils.OciUtils.getDomain(identityClient, tenantId);
+        if (StrUtil.isBlank(domainUrl)) {
+            throw new OciException(-1, "未找到活跃的 Identity Domain，无法重置密码");
+        }
+        try (IdentityDomainsClient domainsClient = newIdentityDomainsClient(domainUrl)) {
+            // Step 1: resolve Classic OCID -> Identity Domain SCIM UUID
+            ListUsersResponse listResp = domainsClient.listUsers(
+                    ListUsersRequest.builder()
+                            .filter("ocid eq \"" + classicUserId + "\"")
+                            .attributes("id,ocid,userName")
+                            .count(1)
+                            .build());
+            Users usersWrapper = listResp.getUsers();
+            if (usersWrapper == null || usersWrapper.getResources() == null
+                    || usersWrapper.getResources().isEmpty()) {
+                throw new OciException(-1, "在 Identity Domain 中未找到该用户: " + classicUserId);
+            }
+            String scimUserId = usersWrapper.getResources().get(0).getId();
+
+            // Step 2: generate a new password and force-set it
+            String newPassword = com.yohann.ocihelper.utils.CommonUtils.generateRandomPassword();
+            com.oracle.bmc.identitydomains.model.UserPasswordChanger body =
+                    com.oracle.bmc.identitydomains.model.UserPasswordChanger.builder()
+                            .schemas(Collections.singletonList(
+                                    "urn:ietf:params:scim:schemas:oracle:idcs:UserPasswordChanger"))
+                            .password(newPassword)
+                            .bypassNotification(true)
+                            .build();
+            try {
+                domainsClient.putUserPasswordChanger(
+                        com.oracle.bmc.identitydomains.requests.PutUserPasswordChangerRequest.builder()
+                                .userPasswordChangerId(scimUserId)
+                                .userPasswordChanger(body)
+                                .build());
+            } catch (com.oracle.bmc.model.BmcException bmcEx) {
+                if (bmcEx.getStatusCode() == 401 || bmcEx.getStatusCode() == 403) {
+                    throw new OciException(-1,
+                            "重置密码失败：API Key 对应用户权限不足。\n" +
+                            "请前往 OCI 控制台完成以下授权（一次性操作）：\n" +
+                            "身份证明 → 域 → Default 域 → 【管理员】标签页 → " +
+                            "找到「用户管理员（User Administrator）」→ 添加当前 API Key 所属用户为成员，然后重试。");
+                }
+                throw bmcEx;
+            }
+            log.info("用户:[{}],区域:[{}],成功通过 Identity Domains API 重置用户:[{}]的登录密码",
+                    user.getUsername(), user.getOciCfg().getRegion(), classicUserId);
+            return newPassword;
+        }
     }
 
     synchronized public InstanceDetailDTO createInstanceData() {
@@ -126,11 +288,11 @@ public class OracleInstanceFetcher implements Closeable {
                 .map(Shape::getShape)
                 .distinct()
                 .collect(Collectors.toList());
-        ArchitectureEnum type = ArchitectureEnum.getType(user.getArchitecture());
-        if (shapeList.isEmpty() || !shapeList.contains(type.getShapeDetail())) {
+        String type = ArchitectureEnum.getType(user.getArchitecture());
+        if (CollectionUtil.isEmpty(shapeList) || !shapeList.contains(type)) {
             instanceDetailDTO.setNoShape(true);
-            log.error("【开机任务】用户：[{}] ，区域：[{}] ，系统架构：[{}] 开机失败，该区域可能不支持 CPU 架构：{}",
-                    user.getUsername(), user.getOciCfg().getRegion(), user.getArchitecture(), user.getArchitecture());
+            log.error("【开机任务】用户:[{}],区域:[{}],系统架构:[{}],开机失败,该区域可能不支持 CPU 架构:[{}],用户可开机的机型:[{}]",
+                    user.getUsername(), user.getOciCfg().getRegion(), user.getArchitecture(), user.getArchitecture(), shapeList);
             return instanceDetailDTO;
         }
 
@@ -154,8 +316,8 @@ public class OracleInstanceFetcher implements Closeable {
                             continue;
                         }
 
-                        if (vcnList.isEmpty()) {
-                            log.info("【开机任务】用户：[{}] ，区域：[{}] ，系统架构：[{}] 检测到VCN不存在，正在创建VCN......",
+                        if (CollectionUtil.isEmpty(vcnList)) {
+                            log.info("【开机任务】用户:[{}],区域:[{}],系统架构:[{}],检测到VCN不存在,正在创建VCN...",
                                     user.getUsername(), user.getOciCfg().getRegion(), user.getArchitecture());
                             String networkCidrBlock = getCidr(virtualNetworkClient, compartmentId);
                             vcn = createVcn(virtualNetworkClient, compartmentId, networkCidrBlock);
@@ -176,7 +338,7 @@ public class OracleInstanceFetcher implements Closeable {
                                         .compartmentId(compartmentId)
                                         .build()).getItems();
                                 if (CollectionUtil.isEmpty(internetGatewayList)) {
-                                    log.info("【开机任务】用户：[{}] ，区域：[{}] ，系统架构：[{}] ，检测到 VCN：{} 的 Internet 网关不存在，正在创建 Internet 网关......",
+                                    log.info("【开机任务】用户:[{}],区域:[{}],系统架构:[{}],检测到 VCN:[{}] 的 Internet 网关不存在,正在创建 Internet 网关...",
                                             user.getUsername(), user.getOciCfg().getRegion(), user.getArchitecture(), vcn.getDisplayName());
                                     internetGateway = createInternetGateway(virtualNetworkClient, compartmentId, vcn);
                                     addInternetGatewayToDefaultRouteTable(virtualNetworkClient, vcn, internetGateway);
@@ -184,7 +346,7 @@ public class OracleInstanceFetcher implements Closeable {
 
                                 List<Subnet> subnets = listSubnets(vcnItem.getId());
                                 if (CollectionUtil.isEmpty(subnets)) {
-                                    log.info("【开机任务】用户：[{}] ，区域：[{}] ，系统架构：[{}] ，检测到 VCN：{} 的子网不存在，正在创建子网......",
+                                    log.info("【开机任务】用户:[{}],区域:[{}],系统架构:[{}], 检测到 VCN:[{}] 的子网不存在,正在创建子网...",
                                             user.getUsername(), user.getOciCfg().getRegion(), user.getArchitecture(), vcn.getDisplayName());
                                     subnet = createSubnet(virtualNetworkClient, compartmentId, availableDomain,
                                             getCidr(virtualNetworkClient, compartmentId), vcnItem);
@@ -197,7 +359,7 @@ public class OracleInstanceFetcher implements Closeable {
                                         }
                                     }
                                     if (subnet == null) {
-                                        log.info("【开机任务】用户：[{}] ，区域：[{}] ，系统架构：[{}] ，检测到 VCN：{} 不存在公有子网，正在删除私有子网并创建公有子网......",
+                                        log.info("【开机任务】用户:[{}],区域:[{}],系统架构:[{}],检测到 VCN:[{}] 不存在公有子网,正在删除私有子网并创建公有子网...",
                                                 user.getUsername(), user.getOciCfg().getRegion(), user.getArchitecture(), vcn.getDisplayName());
                                         subnets.forEach(this::deleteSubnet);
                                         subnet = createSubnet(virtualNetworkClient, compartmentId, availableDomain,
@@ -206,7 +368,7 @@ public class OracleInstanceFetcher implements Closeable {
                                     }
                                 }
                             }
-                            log.info("【开机任务】用户：[{}] ，区域：[{}] ，系统架构：[{}] ，检测到 VCN：{} 存在，默认使用该 VCN 的公有子网：{} 创建实例......",
+                            log.info("【开机任务】用户:[{}],区域:[{}],系统架构:[{}],默认使用 VCN:[{}] 的公有子网:[{}] 创建实例...",
                                     user.getUsername(), user.getOciCfg().getRegion(), user.getArchitecture(), vcn.getDisplayName(), subnet.getDisplayName());
                         }
 
@@ -219,16 +381,17 @@ public class OracleInstanceFetcher implements Closeable {
                         instance = createInstance(computeClient.newWaiters(workRequestClient), launchInstanceDetails);
                         printInstance(computeClient, virtualNetworkClient, instance, instanceDetailDTO);
 
-                        log.info("【开机任务】用户：[{}] ，区域：[{}] ，系统架构：[{}] 开机成功，正在为实例预配......",
+                        log.info("【开机任务】用户:[{}],区域:[{}],系统架构:[{}],开机成功,正在为实例预配...",
                                 user.getUsername(), user.getOciCfg().getRegion(), user.getArchitecture());
                         instanceDetailDTO.setSuccess(true);
                         instanceDetailDTO.setImage(image.getId());
                         instanceDetailDTO.setRegion(user.getOciCfg().getRegion());
                         instanceDetailDTO.setOcpus(user.getOcpus());
                         instanceDetailDTO.setMemory(user.getMemory());
-                        instanceDetailDTO.setDisk(user.getDisk());
+                        instanceDetailDTO.setDisk(user.getDisk() == null ? 50L : user.getDisk());
                         instanceDetailDTO.setRootPassword(user.getRootPassword());
                         instanceDetailDTO.setShape(shape.getShape());
+                        instanceDetailDTO.setInstance(instance);
                         return instanceDetailDTO;
                     }
                 } catch (Exception e) {
@@ -239,32 +402,38 @@ public class OracleInstanceFetcher implements Closeable {
                                         error.getMessage().contains(ErrorEnum.CAPACITY_HOST.getErrorType()))) {
                             size--;
                             if (size > 0) {
-                                log.warn("【开机任务】用户：[{}] ，区域：[{}] ，系统架构：[{}] 容量不足，换可用区域继续执行......",
+                                log.warn("【开机任务】用户:[{}],区域:[{}],系统架构:[{}],容量不足,换可用区域继续执行...",
                                         user.getUsername(), user.getOciCfg().getRegion(), user.getArchitecture());
                             } else {
-                                log.warn("【开机任务】用户：[{}] ，区域：[{}] ，系统架构：[{}] 容量不足，[{}]秒后将重试......",
+                                log.warn("【开机任务】用户:[{}],区域:[{}],系统架构:[{}],容量不足,[{}]秒后将重试...",
                                         user.getUsername(), user.getOciCfg().getRegion(), user.getArchitecture(), user.getInterval());
+                                return instanceDetailDTO;
                             }
                         } else if (error.getStatusCode() == 400 && error.getMessage().contains(ErrorEnum.LIMIT_EXCEEDED.getErrorType())) {
                             instanceDetailDTO.setOut(true);
-                            log.error("【开机任务】用户：[{}] ，区域：[{}] ，系统架构：[{}] 无法创建实例，配额已经超过限制~",
+                            log.error("【开机任务】用户:[{}],区域:[{}],系统架构:[{}],无法创建实例,配额已经超过限制~",
                                     user.getUsername(), user.getOciCfg().getRegion(), user.getArchitecture(), e);
                             return instanceDetailDTO;
                         } else if (error.getStatusCode() == 429 || error.getMessage().contains(ErrorEnum.TOO_MANY_REQUESTS.getErrorType())) {
                             instanceDetailDTO.setTooManyReq(true);
-                            log.warn("【开机任务】用户：[{}] ，区域：[{}] ，系统架构：[{}] 开机请求频繁，[{}]秒后将重试......",
+                            log.warn("【开机任务】用户:[{}],区域:[{}],系统架构:[{}],开机请求频繁,[{}]秒后将重试...",
                                     user.getUsername(), user.getOciCfg().getRegion(), user.getArchitecture(), user.getInterval());
+                            return instanceDetailDTO;
+                        } else if (error.getStatusCode() == 401 || error.getMessage().contains(ErrorEnum.NOT_AUTHENTICATED.getErrorType())) {
+                            instanceDetailDTO.setDie(true);
+                            log.error("【开机任务】用户:[{}],区域:[{}],系统架构:[{}],开机失败,可能的原因：(新生成的API暂未生效|账号已无权|账号已封禁\uD83D\uDC7B)",
+                                    user.getUsername(), user.getOciCfg().getRegion(), user.getArchitecture());
                             return instanceDetailDTO;
                         } else {
 //                            instanceDetailDTO.setOut(true);
-                            log.error("【开机任务】用户：[{}] ，区域：[{}] ，系统架构：[{}] 出现错误了，原因为：{}",
+                            log.error("【开机任务】用户:[{}],区域:[{}],系统架构:[{}],出现错误了,原因为:{}",
                                     user.getUsername(), user.getOciCfg().getRegion(), user.getArchitecture(),
                                     e.getMessage(), e);
                             return instanceDetailDTO;
                         }
                     } else {
 //                        instanceDetailDTO.setOut(true);
-                        log.error("【开机任务】用户：[{}] ，区域：[{}] ，系统架构：[{}] 出现错误了，原因为：{}",
+                        log.error("【开机任务】用户:[{}],区域:[{}],系统架构:[{}],出现错误了,原因为:{}",
                                 user.getUsername(), user.getOciCfg().getRegion(), user.getArchitecture(),
                                 e.getMessage(), e);
                         return instanceDetailDTO;
@@ -273,16 +442,24 @@ public class OracleInstanceFetcher implements Closeable {
             }
         } catch (Exception e) {
 //            instanceDetailDTO.setOut(true);
-            log.error("【开机任务】用户：[{}] ，区域：[{}] ，系统架构：[{}] 出现错误了，原因为：{}",
+            log.error("【开机任务】用户:[{}],区域:[{}],系统架构:[{}],出现错误了,原因为:{}",
                     user.getUsername(), user.getOciCfg().getRegion(), user.getArchitecture(),
                     e.getMessage(), e);
             return instanceDetailDTO;
         }
+        log.warn("【开机任务】用户:[{}],区域:[{}],系统架构:[{}],容量不足,[{}]秒后将重试...",
+                user.getUsername(), user.getOciCfg().getRegion(), user.getArchitecture(), user.getInterval());
         return instanceDetailDTO;
     }
 
     public SysUserDTO getUser() {
         return user;
+    }
+
+    public String getRegisteredTime() {
+        return CommonUtils.dateFmt2String(identityClient.getCompartment(GetCompartmentRequest.builder()
+                .compartmentId(compartmentId)
+                .build()).getCompartment().getTimeCreated());
     }
 
     public boolean checkVcnIsPublic(Vcn vcn) {
@@ -303,7 +480,7 @@ public class OracleInstanceFetcher implements Closeable {
     public List<com.oracle.bmc.identity.model.Region> listAllRegions() {
         ListRegionsResponse listRegionsResponse = identityClient.listRegions(ListRegionsRequest.builder().build());
         List<com.oracle.bmc.identity.model.Region> regions = listRegionsResponse.getItems();
-        return regions.isEmpty() ? Collections.emptyList() : regions;
+        return CollectionUtil.isEmpty(regions) ? Collections.emptyList() : regions;
     }
 
     public List<RegionSubscription> listRegionSubscriptions() {
@@ -312,7 +489,7 @@ public class OracleInstanceFetcher implements Closeable {
                         .tenancyId(compartmentId)
                         .build());
         List<RegionSubscription> subscriptionList = response.getItems();
-        return subscriptionList.isEmpty() ? Collections.emptyList() : subscriptionList;
+        return CollectionUtil.isEmpty(subscriptionList) ? Collections.emptyList() : subscriptionList;
     }
 
     public void deleteAllMfa() {
@@ -321,7 +498,7 @@ public class OracleInstanceFetcher implements Closeable {
                         .userId(user.getOciCfg().getUserId())
                         .build());
         List<MfaTotpDeviceSummary> listMfaTotpDevicesResponseItems = listMfaTotpDevicesResponse.getItems();
-        if (!listMfaTotpDevicesResponseItems.isEmpty()) {
+        if (CollectionUtil.isNotEmpty(listMfaTotpDevicesResponseItems)) {
             listMfaTotpDevicesResponseItems.parallelStream().forEach(item -> {
                 identityClient.deleteMfaTotpDevice(DeleteMfaTotpDeviceRequest.builder()
                         .mfaTotpDeviceId(item.getId())
@@ -336,7 +513,7 @@ public class OracleInstanceFetcher implements Closeable {
                 .userId(user.getOciCfg().getUserId())
                 .build());
         List<ApiKey> items = listApiKeysResponse.getItems();
-        if (!items.isEmpty()) {
+        if (CollectionUtil.isNotEmpty(items)) {
             items.parallelStream().forEach(item -> {
                 identityClient.deleteApiKey(DeleteApiKeyRequest.builder()
                         .userId(user.getOciCfg().getUserId())
@@ -369,9 +546,61 @@ public class OracleInstanceFetcher implements Closeable {
                         .userId(user.getOciCfg().getUserId())
                         .build());
         String password = uIPassword.getUIPassword().getPassword();
-        log.info("用户：[{}] ，区域：[{}] 成功创建/重置登录密码，新密码：【 {} 】",
+        log.info("用户:[{}],区域:[{}],成功创建/重置登录密码,新密码:【 {} 】",
                 user.getUsername(), user.getOciCfg().getRegion(), password);
         return password;
+    }
+
+    /**
+     * Query the tenant's subscription info via OSP Gateway.
+     * Requires the home region endpoint; returns null if unavailable or unauthorized.
+     *
+     * @return {@link Subscription} or null
+     */
+    public Subscription getSubscriptionInfo() {
+        String tenantId = user.getOciCfg().getTenantId();
+        // Resolve the home region name from the subscribed regions list
+        String homeRegion = identityClient.listRegionSubscriptions(
+                        ListRegionSubscriptionsRequest.builder()
+                                .tenancyId(tenantId)
+                                .build()).getItems().stream()
+                .filter(r -> Boolean.TRUE.equals(r.getIsHomeRegion()))
+                .map(RegionSubscription::getRegionName)
+                .findFirst()
+                .orElse(null);
+        if (homeRegion == null) {
+            log.warn("用户:[{}] 无法获取 home region，跳过订阅信息查询", user.getUsername());
+            return null;
+        }
+        try (SubscriptionServiceClient client = SubscriptionServiceClient.builder().build(provider)) {
+            // OSP Gateway must use the home region endpoint
+            client.setRegion(homeRegion);
+            ListSubscriptionsResponse listResp = client.listSubscriptions(
+                    ListSubscriptionsRequest.builder()
+                            .compartmentId(tenantId)
+                            .ospHomeRegion(homeRegion)
+                            .build());
+            List<SubscriptionSummary> items = listResp.getSubscriptionCollection().getItems();
+            if (CollectionUtil.isEmpty(items)) {
+                log.warn("用户:[{}] 订阅列表为空", user.getUsername());
+                return null;
+            }
+            String subscriptionId = items.get(0).getId();
+            GetSubscriptionResponse getResp = client.getSubscription(
+                    GetSubscriptionRequest.builder()
+                            .subscriptionId(subscriptionId)
+                            .compartmentId(tenantId)
+                            .ospHomeRegion(homeRegion)
+                            .build());
+            Subscription subscription = getResp.getSubscription();
+            log.debug("用户:[{}],区域:[{}],订阅类型:[{}],账户类型:[{}]",
+                    user.getUsername(), homeRegion,
+                    subscription.getPlanType(), subscription.getAccountType());
+            return subscription;
+        } catch (BmcException e) {
+            log.warn("用户:[{}] 获取订阅信息失败 ({}): {}", user.getUsername(), e.getStatusCode(), e.getMessage());
+            return null;
+        }
     }
 
     public List<Instance> listInstances() {
@@ -406,7 +635,7 @@ public class OracleInstanceFetcher implements Closeable {
                 .map(x -> {
                     String vnicId = x.getVnicId();
                     if (vnicId != null) {
-                        // 获取VNIC详细信息，包括IP地址
+                        // 获取VNIC详细信息,包括IP地址
                         GetVnicRequest getVnicRequest = GetVnicRequest.builder().vnicId(vnicId).build();
                         GetVnicResponse getVnicResponse = virtualNetworkClient.getVnic(getVnicRequest);
                         Vnic vnic = getVnicResponse.getVnic();
@@ -437,8 +666,8 @@ public class OracleInstanceFetcher implements Closeable {
                         .compartmentId(compartmentId)
                         .build());
         List<AvailabilityDomain> availabilityDomainList = listAvailabilityDomainsResponse.getItems();
-        if (availabilityDomainList.isEmpty()) {
-            log.error("用户：[{}] ，区域：[{}] ，可用域不足", user.getUsername(), user.getOciCfg().getRegion());
+        if (CollectionUtil.isEmpty(availabilityDomainList)) {
+            log.error("用户:[{}],区域:[{}],可用域不足", user.getUsername(), user.getOciCfg().getRegion());
             throw new OciException(-1, "可用域不足");
         }
         return availabilityDomainList;
@@ -450,8 +679,8 @@ public class OracleInstanceFetcher implements Closeable {
                         .compartmentId(compartmentId)
                         .build());
         List<AvailabilityDomain> availabilityDomainList = listAvailabilityDomainsResponse.getItems();
-        if (availabilityDomainList.isEmpty()) {
-            log.error("用户：[{}] ，区域：[{}] ，可用域不足", user.getUsername(), user.getOciCfg().getRegion());
+        if (CollectionUtil.isEmpty(availabilityDomainList)) {
+            log.error("用户:[{}],区域:[{}],可用域不足", user.getUsername(), user.getOciCfg().getRegion());
             throw new OciException(-1, "可用域不足");
         }
         return availabilityDomainList;
@@ -467,14 +696,12 @@ public class OracleInstanceFetcher implements Closeable {
                 .compartmentId(compartmentId)
                 .build());
         List<Shape> shapes = listShapesResponse.getItems();
-        List<Shape> vmShapes = shapes.isEmpty() ? Collections.emptyList() : shapes.stream()
-                .filter(shape -> shape.getShape().startsWith("VM"))
-                .collect(Collectors.toList());
+        List<Shape> vmShapes = CollectionUtil.isEmpty(shapes) ? Collections.emptyList() : shapes;
         List<Shape> shapesNewList = new ArrayList<>();
-        ArchitectureEnum type = ArchitectureEnum.getType(user.getArchitecture());
-        if (!vmShapes.isEmpty()) {
+        String type = ArchitectureEnum.getType(user.getArchitecture());
+        if (CollectionUtil.isNotEmpty(vmShapes)) {
             for (Shape vmShape : vmShapes) {
-                if (type.getShapeDetail().equals(vmShape.getShape())) {
+                if (type.equals(vmShape.getShape())) {
                     shapesNewList.add(vmShape);
                 }
             }
@@ -493,7 +720,7 @@ public class OracleInstanceFetcher implements Closeable {
                         .build();
         ListImagesResponse response = computeClient.listImages(listImagesRequest);
         List<Image> images = response.getItems();
-        if (images.isEmpty()) {
+        if (CollectionUtil.isEmpty(images)) {
             return null;
         }
 
@@ -588,6 +815,23 @@ public class OracleInstanceFetcher implements Closeable {
                 .build());
         deleteAllSubnets(vcnId);
         deleteAllInternetGateways(vcnId);
+        List<NetworkSecurityGroup> securityGroupList = virtualNetworkClient.listNetworkSecurityGroups(ListNetworkSecurityGroupsRequest.builder()
+                .compartmentId(compartmentId)
+                .vcnId(vcnId)
+                .build()).getItems();
+        if (CollectionUtil.isNotEmpty(securityGroupList)) {
+            for (NetworkSecurityGroup networkSecurityGroup : securityGroupList) {
+                virtualNetworkClient.updateNetworkSecurityGroupSecurityRules(UpdateNetworkSecurityGroupSecurityRulesRequest.builder()
+                        .networkSecurityGroupId(networkSecurityGroup.getId())
+                        .updateNetworkSecurityGroupSecurityRulesDetails(UpdateNetworkSecurityGroupSecurityRulesDetails.builder()
+                                .securityRules(Collections.emptyList())
+                                .build())
+                        .build());
+                virtualNetworkClient.deleteNetworkSecurityGroup(DeleteNetworkSecurityGroupRequest.builder()
+                        .networkSecurityGroupId(networkSecurityGroup.getId())
+                        .build());
+            }
+        }
         virtualNetworkClient.deleteVcn(DeleteVcnRequest.builder()
                 .vcnId(vcnId)
                 .build());
@@ -600,7 +844,7 @@ public class OracleInstanceFetcher implements Closeable {
                         .compartmentId(compartmentId)
                         .build()
         );
-        if (subnetsResponse.getItems().isEmpty()) {
+        if (CollectionUtil.isEmpty(subnetsResponse.getItems())) {
             return;
         }
         subnetsResponse.getItems().forEach(subnet -> virtualNetworkClient.deleteSubnet(
@@ -614,7 +858,7 @@ public class OracleInstanceFetcher implements Closeable {
                         .compartmentId(compartmentId)
                         .build()
         );
-        if (response.getItems().isEmpty()) {
+        if (CollectionUtil.isEmpty(response.getItems())) {
             return;
         }
         response.getItems().forEach(ig -> virtualNetworkClient.deleteInternetGateway(
@@ -689,7 +933,7 @@ public class OracleInstanceFetcher implements Closeable {
 
         if (ruleExists) {
             log.info("The route rule for destination 0.0.0.0/0 already exists.");
-            return; // 退出方法，不添加新的规则
+            return; // 退出方法,不添加新的规则
         }
 
         // 创建新的路由规则
@@ -739,7 +983,7 @@ public class OracleInstanceFetcher implements Closeable {
                 .forRouteTable(getRouteTableRequest, RouteTable.LifecycleState.Available)
                 .execute();
         if (log.isDebugEnabled()) {
-            System.out.println("Cleared route rules from route table: " + vcn.getDefaultRouteTableId());
+            System.out.println("Cleared route rules from route table:" + vcn.getDefaultRouteTableId());
             System.out.println();
         }
 
@@ -791,7 +1035,7 @@ public class OracleInstanceFetcher implements Closeable {
                     .forSubnet(getSubnetRequest, Subnet.LifecycleState.Terminated)
                     .execute();
 
-            log.info("Deleted Subnet: [{}]", subnet.getId());
+            log.info("Deleted Subnet:[{}]", subnet.getId());
         } catch (Exception e) {
             log.error("delete subnet fail error", e);
         }
@@ -805,13 +1049,13 @@ public class OracleInstanceFetcher implements Closeable {
 
         ListSubnetsResponse response = virtualNetworkClient.listSubnets(request);
 
-//        for (Subnet subnet : response.getItems()) {
-//            System.out.println("Subnet Name: " + subnet.getDisplayName() + ", OCID: " + subnet.getId());
+//        for (Subnet subnet :response.getItems()) {
+//            System.out.println("Subnet Name:" + subnet.getDisplayName() + ", OCID:" + subnet.getId());
 //        }
         return response.getItems();
     }
 
-    private NetworkSecurityGroup createNetworkSecurityGroup(
+    public NetworkSecurityGroup createNetworkSecurityGroup(
             VirtualNetworkClient virtualNetworkClient, String compartmentId, Vcn vcn)
             throws Exception {
         String networkSecurityGroupName = System.currentTimeMillis() + "-nsg";
@@ -857,7 +1101,7 @@ public class OracleInstanceFetcher implements Closeable {
                 getNetworkSecurityGroupResponse.getNetworkSecurityGroup();
 
         if (log.isDebugEnabled()) {
-            System.out.println("Created Network Security Group: " + networkSecurityGroup.getId());
+            System.out.println("Created Network Security Group:" + networkSecurityGroup.getId());
             System.out.println(networkSecurityGroup);
             System.out.println();
         }
@@ -865,7 +1109,7 @@ public class OracleInstanceFetcher implements Closeable {
         return networkSecurityGroup;
     }
 
-    private void deleteNetworkSecurityGroup(
+    public void deleteNetworkSecurityGroup(
             VirtualNetworkClient virtualNetworkClient, NetworkSecurityGroup networkSecurityGroup)
             throws Exception {
         DeleteNetworkSecurityGroupRequest deleteNetworkSecurityGroupRequest =
@@ -886,7 +1130,7 @@ public class OracleInstanceFetcher implements Closeable {
                 .execute();
 
         if (log.isDebugEnabled()) {
-            System.out.println("Deleted Network Security Group: " + networkSecurityGroup.getId());
+            System.out.println("Deleted Network Security Group:" + networkSecurityGroup.getId());
             System.out.println();
         }
 
@@ -899,13 +1143,13 @@ public class OracleInstanceFetcher implements Closeable {
 
         ListNetworkSecurityGroupsResponse response = virtualNetworkClient.listNetworkSecurityGroups(request);
 
-//        for (NetworkSecurityGroup nsg : response.getItems()) {
-//            System.out.println("NetworkSecurityGroup Name: " + nsg.getDisplayName() + ", OCID: " + nsg.getId());
+//        for (NetworkSecurityGroup nsg :response.getItems()) {
+//            System.out.println("NetworkSecurityGroup Name:" + nsg.getDisplayName() + ", OCID:" + nsg.getId());
 //        }
         return response.getItems();
     }
 
-    private void addNetworkSecurityGroupSecurityRules(
+    public void addNetworkSecurityGroupSecurityRules(
             VirtualNetworkClient virtualNetworkClient,
             NetworkSecurityGroup networkSecurityGroup,
             String networkCidrBlock) {
@@ -966,7 +1210,7 @@ public class OracleInstanceFetcher implements Closeable {
 
     }
 
-    private void clearNetworkSecurityGroupSecurityRules(
+    public void clearNetworkSecurityGroupSecurityRules(
             VirtualNetworkClient virtualNetworkClient, NetworkSecurityGroup networkSecurityGroup) {
         ListNetworkSecurityGroupSecurityRulesRequest listNetworkSecurityGroupSecurityRulesRequest =
                 ListNetworkSecurityGroupSecurityRulesRequest.builder()
@@ -996,7 +1240,7 @@ public class OracleInstanceFetcher implements Closeable {
                 removeNetworkSecurityGroupSecurityRulesRequest);
 
         System.out.println(
-                "Removed all Security Rules in Network Security Group: "
+                "Removed all Security Rules in Network Security Group:"
                         + networkSecurityGroup.getId());
         System.out.println();
     }
@@ -1017,7 +1261,7 @@ public class OracleInstanceFetcher implements Closeable {
                 .execute();
         Instance instance = getInstanceResponse.getInstance();
 
-//        System.out.println("Launched Instance: " + instance.getId());
+//        System.out.println("Launched Instance:" + instance.getId());
 //        System.out.println(instance);
 //        System.out.println();
         return instance;
@@ -1034,35 +1278,27 @@ public class OracleInstanceFetcher implements Closeable {
             SysUserDTO user) {
         String instanceName = "instance-" + LocalDateTime.now().format(CommonUtils.DATETIME_FMT_PURE);
         String encodedCloudInitScript = Base64.getEncoder().encodeToString(script.getBytes());
-//        Map<String, Object> extendedMetadata = new HashMap<>();
-        /*extendedMetadata.put(
-                "java-sdk-example-extended-metadata-key",
-                "java-sdk-example-extended-metadata-value");
-        extendedMetadata = Collections.unmodifiableMap(extendedMetadata);*/
-        InstanceSourceViaImageDetails instanceSourceViaImageDetails = InstanceSourceViaImageDetails.builder()
-                .imageId(image.getId())
-                //.kmsKeyId((kmsKeyId == null || "".equals(kmsKeyId)) ? null : kmsKeyId)
-                .build();
-        CreateVnicDetails createVnicDetails = CreateVnicDetails.builder()
-                .subnetId(subnet.getId())
-                .nsgIds(networkSecurityGroup == null ? null : Arrays.asList(networkSecurityGroup.getId()))
-                .build();
-        LaunchInstanceAgentConfigDetails launchInstanceAgentConfigDetails = LaunchInstanceAgentConfigDetails.builder()
-                .isMonitoringDisabled(true)
-                .build();
         return LaunchInstanceDetails.builder()
                 .availabilityDomain(availabilityDomain.getName())
                 .compartmentId(compartmentId)
                 .displayName(instanceName)
                 // faultDomain is optional parameter
 //                .faultDomain("FAULT-DOMAIN-2")
-                .sourceDetails(instanceSourceViaImageDetails)
+                .sourceDetails(InstanceSourceViaImageDetails.builder()
+                        .imageId(image.getId())
+                        //.kmsKeyId((kmsKeyId == null || "".equals(kmsKeyId)) ? null :kmsKeyId)
+                        .build())
                 .metadata(Collections.singletonMap("user_data", encodedCloudInitScript))
 //                .extendedMetadata(extendedMetadata)
                 .shape(shape.getShape())
-                .createVnicDetails(createVnicDetails)
+                .createVnicDetails(CreateVnicDetails.builder()
+                        .subnetId(subnet.getId())
+                        .nsgIds(networkSecurityGroup == null ? null : Arrays.asList(networkSecurityGroup.getId()))
+                        .build())
                 // agentConfig is an optional parameter
-                .agentConfig(launchInstanceAgentConfigDetails)
+                .agentConfig(LaunchInstanceAgentConfigDetails.builder()
+                        .isMonitoringDisabled(true)
+                        .build())
                 //配置核心和内存
                 .shapeConfig(LaunchInstanceShapeConfigDetails.
                         builder().
@@ -1074,6 +1310,9 @@ public class OracleInstanceFetcher implements Closeable {
                         .imageId(image.getId())
                         .bootVolumeSizeInGBs(user.getDisk())
                         .build())
+                // 将 root 密码存入实例的自由标签，方便后续查询（通知未配置时也能找回密码）
+                .freeformTags(StrUtil.isBlank(user.getRootPassword()) ? null :
+                        Collections.singletonMap(OciInstanceConstant.TAG_ROOT_PASSWORD, user.getRootPassword()))
                 .build();
     }
 
@@ -1200,7 +1439,7 @@ public class OracleInstanceFetcher implements Closeable {
             return tenantId;
         }
 
-        // 如果没有找到根区间，返回租户ID作为默认值
+        // 如果没有找到根区间,返回租户ID作为默认值
         return tenantId;
     }
 
@@ -1215,18 +1454,19 @@ public class OracleInstanceFetcher implements Closeable {
             // 返回第一个 Private IP 的 ID
             return privateIp.getId();
         }
-        throw new RuntimeException("No Private IP found for VNIC ID: " + vnic.getId());
+        throw new RuntimeException("No Private IP found for VNIC ID:" + vnic.getId());
     }
 
     public void releaseUnusedPublicIps() {
         ListPublicIpsRequest listPublicIpsRequest = ListPublicIpsRequest.builder()
                 .compartmentId(compartmentId)
                 .scope(ListPublicIpsRequest.Scope.Region)
+                .lifetime(ListPublicIpsRequest.Lifetime.Ephemeral)
                 .build();
 
         ListPublicIpsResponse response = virtualNetworkClient.listPublicIps(listPublicIpsRequest);
         List<PublicIp> publicIpList = response.getItems();
-        if (publicIpList.isEmpty()) {
+        if (CollectionUtil.isEmpty(publicIpList)) {
             return;
         }
         for (PublicIp publicIp : response.getItems()) {
@@ -1235,7 +1475,7 @@ public class OracleInstanceFetcher implements Closeable {
                         .publicIpId(publicIp.getId())
                         .build();
                 virtualNetworkClient.deletePublicIp(deleteRequest);
-                log.info("Released unused Public IP: {}", publicIp.getIpAddress());
+                log.info("Released unused Public IP:[{}]", publicIp.getIpAddress());
             }
         }
     }
@@ -1246,11 +1486,11 @@ public class OracleInstanceFetcher implements Closeable {
         }
         String vnicId = vnic.getId();
         if (vnicId != null) {
-            // Step 1: 解除当前的 Public IP（如果已存在）
+            // Step 1:解除当前的 Public IP（如果已存在）
             GetVnicRequest getVnicRequest = GetVnicRequest.builder().vnicId(vnicId).build();
             String existingPublicIpAddress = virtualNetworkClient.getVnic(getVnicRequest).getVnic().getPublicIp();
             if (StrUtil.isNotBlank(existingPublicIpAddress)) {
-                // Step 1: 查找公网 IP 的 OCID
+                // Step 1:查找公网 IP 的 OCID
                 GetPublicIpByIpAddressRequest getPublicIpByIpAddressRequest = GetPublicIpByIpAddressRequest.builder()
                         .getPublicIpByIpAddressDetails(
                                 GetPublicIpByIpAddressDetails.builder()
@@ -1264,14 +1504,14 @@ public class OracleInstanceFetcher implements Closeable {
                         .publicIpId(existingPublicIpId)
                         .build();
                 virtualNetworkClient.deletePublicIp(deleteRequest);
-//                System.out.println("Existing public IP detached: " + existingPublicIpId);
+//                System.out.println("Existing public IP detached:" + existingPublicIpId);
             }
         }
 
         String publicIp;
         try {
             String privateIpId = getPrivateIpIdForVnic(vnic);
-            // Step 1: 创建一个 Reserved Public IP
+            // Step 1:创建一个 Reserved Public IP
             CreatePublicIpDetails createPublicIpDetails = CreatePublicIpDetails.builder()
                     .compartmentId(compartmentId)
                     .lifetime(Ephemeral)  // 设置为 Reserved
@@ -1283,9 +1523,9 @@ public class OracleInstanceFetcher implements Closeable {
                     .build();
 
             PublicIp reservedPublicIp = virtualNetworkClient.createPublicIp(createRequest).getPublicIp();
-//            log.info("Reserved Public IP created: {}", reservedPublicIp.getIpAddress());
+//            log.info("Reserved Public IP created:[{}]", reservedPublicIp.getIpAddress());
 
-            // Step 2: 使用 UpdatePublicIpRequest 将 Reserved Public IP 关联到 VNIC
+            // Step 2:使用 UpdatePublicIpRequest 将 Reserved Public IP 关联到 VNIC
             UpdatePublicIpDetails updatePublicIpDetails = UpdatePublicIpDetails.builder()
                     .privateIpId(privateIpId)
                     .build();
@@ -1295,11 +1535,11 @@ public class OracleInstanceFetcher implements Closeable {
                     .build();
 
             virtualNetworkClient.updatePublicIp(updateRequest);
-//            log.info("Reserved Public IP attached to VNIC: " + reservedPublicIp.getIpAddress());
+//            log.info("Reserved Public IP attached to VNIC:" + reservedPublicIp.getIpAddress());
             publicIp = reservedPublicIp.getIpAddress();
             return publicIp;
         } catch (Exception e) {
-            log.error("【更换公共IP】用户：[{}] ，区域：[{}] 更换IP任务异常，稍后将重试......", user.getUsername(), user.getOciCfg().getRegion());
+            log.error("【更换公共IP】用户:[{}],区域:[{}],更换IP任务异常,稍后将重试...", user.getUsername(), user.getOciCfg().getRegion());
         } finally {
             releaseUnusedPublicIps();
         }
@@ -1350,7 +1590,7 @@ public class OracleInstanceFetcher implements Closeable {
                         .collect(Collectors.toList()));
             }
         }
-        if (bootVolumes.isEmpty()) {
+        if (CollectionUtil.isEmpty(bootVolumes)) {
             throw new OciException(-1, "实例引导卷不存在");
         }
         return bootVolumes;
@@ -1372,8 +1612,10 @@ public class OracleInstanceFetcher implements Closeable {
                     .availabilityDomain(availabilityDomain.getName())
                     .compartmentId(compartmentId)
                     .build()).getItems();
-            if (null != items && !items.isEmpty()) {
-                bootVolumes.addAll(items.stream().map(BootVolume::getId)
+            if (CollectionUtil.isNotEmpty(items)) {
+                bootVolumes.addAll(items.stream()
+                        .filter(x -> !x.getLifecycleState().getValue().equals(BootVolume.LifecycleState.Terminated.getValue()))
+                        .map(BootVolume::getId)
                         .collect(Collectors.toList())
                         .parallelStream().map(this::getBootVolumeById)
                         .collect(Collectors.toList()));
@@ -1389,19 +1631,22 @@ public class OracleInstanceFetcher implements Closeable {
                 .build());
     }
 
-    public OciCfgDetailsRsp.InstanceInfo getInstanceInfo(String instanceId) {
+        public OciCfgDetailsRsp.InstanceInfo getInstanceInfo(String instanceId) {
         Instance instance = getInstanceById(instanceId);
         String bootVolumeSize = null;
         try {
             BootVolume bootVolume = getBootVolumeByInstanceId(instanceId);
             bootVolumeSize = bootVolume.getSizeInGBs() + "";
         } catch (Exception e) {
-            log.error("用户：[{}] ，区域：[{}] ， 实例：[{}] ，连接超时或者实例的引导卷不存在~",
+            log.error("用户:[{}],区域:[{}],实例:[{}],连接超时或者实例的引导卷不存在~",
                     user.getUsername(), user.getOciCfg().getRegion(),
                     instance.getDisplayName(), e);
         }
 
-        // 打印引导卷大小（以 GB 为单位）
+        // 从实例自由标签中读取 root 密码（开机时写入，方便未配置通知的用户找回密码）
+        Map<String, String> freeformTags = instance.getFreeformTags();
+        String rootPassword = (freeformTags != null) ? freeformTags.get(OciInstanceConstant.TAG_ROOT_PASSWORD) : null;
+
         return OciCfgDetailsRsp.InstanceInfo.builder()
                 .ocId(instanceId)
                 .region(instance.getRegion())
@@ -1420,6 +1665,7 @@ public class OracleInstanceFetcher implements Closeable {
                 .vnicList(listVnicByInstanceId(instanceId).stream()
                         .map(x -> new OciCfgDetailsRsp.InstanceVnicInfo(x.getId(), x.getDisplayName() + "（" + x.getPublicIp() + "）"))
                         .collect(Collectors.toList()))
+                .rootPassword(rootPassword)
                 .build();
     }
 
@@ -1435,7 +1681,7 @@ public class OracleInstanceFetcher implements Closeable {
 
         InstanceActionResponse response = computeClient.instanceAction(request);
         String currentState = response.getInstance().getLifecycleState().getValue();
-        log.info("用户：[{}] ，区域：[{}] 修改实例：[{}] 状态成功！实例当前状态: [{}]",
+        log.info("用户:[{}],区域:[{}],修改实例:[{}],状态成功！实例当前状态:[{}]",
                 user.getUsername(), user.getOciCfg().getRegion(),
                 response.getInstance().getDisplayName(), currentState);
         return currentState;
@@ -1445,8 +1691,8 @@ public class OracleInstanceFetcher implements Closeable {
         TerminateInstanceRequest terminateInstanceRequest = TerminateInstanceRequest.builder()
                 .instanceId(instanceId)
 //                .ifMatch("EXAMPLE-ifMatch-Value")
-                .preserveBootVolume(preserveBootVolume) // 是否删除或保留引导卷 ，默认false不保留
-                .preserveDataVolumesCreatedAtLaunch(preserveDataVolumesCreatedAtLaunch) // 是否删除或保留启动期间创建的数据卷，默认true保留
+                .preserveBootVolume(preserveBootVolume) // 是否删除或保留引导卷 默认false不保留
+                .preserveDataVolumesCreatedAtLaunch(preserveDataVolumesCreatedAtLaunch) // 是否删除或保留启动期间创建的数据卷,默认true保留
                 .build();
 
         /* Send request to the Client */
@@ -1455,7 +1701,7 @@ public class OracleInstanceFetcher implements Closeable {
 
     public List<Vnic> listVnicByInstanceId(String instanceId) {
         List<Vnic> vnics = listInstanceIPs(instanceId);
-        if (vnics.isEmpty()) {
+        if (CollectionUtil.isEmpty(vnics)) {
             return null;
         }
         return vnics;
@@ -1463,7 +1709,7 @@ public class OracleInstanceFetcher implements Closeable {
 
     public Vnic getVnicByInstanceId(String instanceId) {
         List<Vnic> vnics = listInstanceIPs(instanceId);
-        if (vnics.isEmpty()) {
+        if (CollectionUtil.isEmpty(vnics)) {
             return null;
         }
         for (Vnic vnic : vnics) {
@@ -1485,7 +1731,7 @@ public class OracleInstanceFetcher implements Closeable {
     public InstanceCfgDTO getInstanceCfg(String instanceId) {
         Instance instance = getInstanceById(instanceId);
         List<String> ipv6Addresses = getVnicByInstanceId(instanceId).getIpv6Addresses();
-        String ipv6 = (null == ipv6Addresses || ipv6Addresses.isEmpty()) ? null : ipv6Addresses.get(0);
+        String ipv6 = CollectionUtil.isEmpty(ipv6Addresses) ? null : ipv6Addresses.get(0);
 
         String bootVolumeSize = null;
         String bootVolumeVpu = null;
@@ -1494,7 +1740,7 @@ public class OracleInstanceFetcher implements Closeable {
             bootVolumeSize = bootVolume.getSizeInGBs() + "";
             bootVolumeVpu = bootVolume.getVpusPerGB() + "";
         } catch (Exception e) {
-            log.error("用户：[{}] ，区域：[{}] ， 实例：[{}] 的引导卷不存在~",
+            log.error("用户:[{}],区域:[{}],实例:[{}]的引导卷不存在~",
                     user.getUsername(), user.getOciCfg().getRegion(),
                     instance.getDisplayName());
         }
@@ -1506,6 +1752,7 @@ public class OracleInstanceFetcher implements Closeable {
                 .memory(String.valueOf(instance.getShapeConfig().getMemoryInGBs()))
                 .bootVolumeSize(bootVolumeSize)
                 .bootVolumeVpu(bootVolumeVpu)
+                .shape(instance.getShape())
                 .build();
     }
 
@@ -1528,11 +1775,11 @@ public class OracleInstanceFetcher implements Closeable {
 //        GetRouteTableRequest getRouteTableRequest = GetRouteTableRequest.builder().rtId(vcn.getDefaultRouteTableId()).build();
 //        GetRouteTableResponse getRouteTableResponse = virtualNetworkClient.getRouteTable(getRouteTableRequest);
 //        RouteTable routeTable = getRouteTableResponse.getRouteTable();
-//        if (routeTable.getRouteRules().isEmpty()) {
+//        if (CollectionUtil.isEmpty(routeTable.getRouteRules())) {
 //            routeRules.add(v4Route);
 //            routeRules.add(v6Route);
 //        } else {
-//            for (RouteRule rule : routeTable.getRouteRules()) {
+//            for (RouteRule rule :routeTable.getRouteRules()) {
 //                if (!rule.getDestination().contains(v4Route.getDestination())) {
 //                    routeRules.add(v4Route);
 //                }
@@ -1550,29 +1797,29 @@ public class OracleInstanceFetcher implements Closeable {
                         .build())
                 .build();
         virtualNetworkClient.updateRouteTable(updateRouteTableRequest);
-        log.info("用户：[{}] ，区域：[{}] 更新了 VCN：{} 的路由表",
+        log.info("用户:[{}],区域:[{}],更新了 VCN:[{}] 的路由表",
                 user.getUsername(), user.getOciCfg().getRegion(), vcn.getDisplayName());
     }
 
-    public void releaseSecurityRule(Vcn vcn, Integer type) {
+    public void releaseSecurityRule(Vcn vcn, Integer type, String ipv4Cidr, String ipv6Cidr) {
         IngressSecurityRule in4 = IngressSecurityRule.builder()
                 .sourceType(IngressSecurityRule.SourceType.CidrBlock)
-                .source("0.0.0.0/0")
+                .source(ipv4Cidr)
                 .protocol("all")
                 .build();
         EgressSecurityRule out4 = EgressSecurityRule.builder()
                 .destinationType(EgressSecurityRule.DestinationType.CidrBlock)
-                .destination("0.0.0.0/0")
+                .destination(ipv4Cidr)
                 .protocol("all")
                 .build();
         IngressSecurityRule in6 = IngressSecurityRule.builder()
                 .sourceType(IngressSecurityRule.SourceType.CidrBlock)
-                .source("::/0")
+                .source(ipv6Cidr)
                 .protocol("all")
                 .build();
         EgressSecurityRule out6 = EgressSecurityRule.builder()
                 .destinationType(EgressSecurityRule.DestinationType.CidrBlock)
-                .destination("::/0")
+                .destination(ipv6Cidr)
                 .protocol("all")
                 .build();
         List<IngressSecurityRule> inList;
@@ -1587,7 +1834,7 @@ public class OracleInstanceFetcher implements Closeable {
                 outList = Collections.singletonList(out6);
                 break;
             default:
-                if (vcn.getIpv6CidrBlocks().isEmpty()) {
+                if (CollectionUtil.isEmpty(vcn.getIpv6CidrBlocks())) {
                     inList = Collections.singletonList(in4);
                     outList = Collections.singletonList(out4);
                 } else {
@@ -1599,11 +1846,11 @@ public class OracleInstanceFetcher implements Closeable {
         GetSecurityListRequest getSecurityListRequest = GetSecurityListRequest.builder().securityListId(vcn.getDefaultSecurityListId()).build();
         GetSecurityListResponse getSecurityListResponse = virtualNetworkClient.getSecurityList(getSecurityListRequest);
         List<IngressSecurityRule> ingressSecurityRules = getSecurityListResponse.getSecurityList().getIngressSecurityRules();
-        if (ingressSecurityRules.isEmpty()) {
+        if (CollectionUtil.isEmpty(ingressSecurityRules)) {
             ingressSecurityRules = inList;
         } else {
-//            for (IngressSecurityRule rule : ingressSecurityRules) {
-//                for (IngressSecurityRule in : inList) {
+//            for (IngressSecurityRule rule :ingressSecurityRules) {
+//                for (IngressSecurityRule in :inList) {
 //                    if (!rule.getSource().equals(in.getSource()) &&
 //                            !rule.getProtocol().equals(in.getProtocol()) &&
 //                            !rule.getSourceType().equals(in.getSourceType())) {
@@ -1614,11 +1861,11 @@ public class OracleInstanceFetcher implements Closeable {
             ingressSecurityRules.addAll(inList);
         }
         List<EgressSecurityRule> egressSecurityRules = getSecurityListResponse.getSecurityList().getEgressSecurityRules();
-        if (egressSecurityRules.isEmpty()) {
+        if (CollectionUtil.isEmpty(egressSecurityRules)) {
             egressSecurityRules = outList;
         } else {
-//            for (EgressSecurityRule rule : egressSecurityRules) {
-//                for (EgressSecurityRule out : outList) {
+//            for (EgressSecurityRule rule :egressSecurityRules) {
+//                for (EgressSecurityRule out :outList) {
 //                    if (!rule.getDestination().equals(out.getDestination()) &&
 //                            !rule.getProtocol().equals(out.getProtocol()) &&
 //                            !rule.getDestinationType().equals(out.getDestinationType())) {
@@ -1635,7 +1882,7 @@ public class OracleInstanceFetcher implements Closeable {
                         .egressSecurityRules(egressSecurityRules)
                         .build())
                 .build());
-        log.info("用户：[{}] ，区域：[{}] 放行了 VCN：{} 的安全列表中 {} 的所有端口及协议",
+        log.info("用户:[{}],区域:[{}],放行了 VCN:[{}] 的安全列表中[{}]的所有端口及协议",
                 user.getUsername(), user.getOciCfg().getRegion(),
                 vcn.getDisplayName(), type == 0 ? "所有地址" : "IPV" + type);
     }
@@ -1646,8 +1893,8 @@ public class OracleInstanceFetcher implements Closeable {
                 vcn = createVcn(virtualNetworkClient, compartmentId, CIDR_BLOCK);
                 createInternetGateway(virtualNetworkClient, compartmentId, vcn);
             } catch (Exception e) {
-                log.error("用户：[{}] ，区域：[{}] 创建VCN失败", user.getUsername(), user.getOciCfg().getRegion());
-                throw new OciException(-1, "创建VCN失败");
+                log.error("用户:[{}],区域:[{}],创建 VCN 失败", user.getUsername(), user.getOciCfg().getRegion());
+                throw new OciException(-1, "创建 VCN 失败");
             }
         }
 
@@ -1655,7 +1902,7 @@ public class OracleInstanceFetcher implements Closeable {
 
         // 添加ipv6 cidr 前缀
         List<String> oldIpv6CidrBlocks = vcn.getIpv6CidrBlocks();
-        if (null == oldIpv6CidrBlocks || oldIpv6CidrBlocks.isEmpty()) {
+        if (CollectionUtil.isEmpty(oldIpv6CidrBlocks)) {
             try {
                 virtualNetworkClient.addIpv6VcnCidr(AddIpv6VcnCidrRequest.builder()
                         .vcnId(vcnId)
@@ -1674,15 +1921,15 @@ public class OracleInstanceFetcher implements Closeable {
 
         // 子网
         List<Subnet> oldSubnet = listSubnets(vcnId);
-        if (oldSubnet.isEmpty()) {
+        if (CollectionUtil.isEmpty(oldSubnet)) {
             try {
-                log.warn("用户：[{}] ，区域：[{}] 正在创建子网~", user.getUsername(), user.getOciCfg().getRegion());
+                log.warn("用户:[{}],区域:[{}],正在创建子网...", user.getUsername(), user.getOciCfg().getRegion());
                 oldSubnet.add(createSubnet(virtualNetworkClient,
                         compartmentId,
                         getAvailabilityDomains(identityClient, compartmentId).get(0),
                         CIDR_BLOCK, vcn));
             } catch (Exception e) {
-                log.error("用户：[{}] ，区域：[{}] 创建子网失败，原因：[{}]", user.getUsername(), user.getOciCfg().getRegion(), e.getLocalizedMessage());
+                log.error("用户:[{}],区域:[{}],创建子网失败,原因:[{}]", user.getUsername(), user.getOciCfg().getRegion(), e.getLocalizedMessage());
                 throw new OciException(-1, "创建子网失败");
             }
         }
@@ -1701,7 +1948,7 @@ public class OracleInstanceFetcher implements Closeable {
                                 .build());
                     } catch (Exception e) {
                         if (e.getMessage().contains("has ULA CIDR(s) assigned")) {
-                            log.warn("subnet ipv6CidrBlock: {} exists", subnetV6Cidr);
+                            log.warn("subnet ipv6CidrBlock: [{}] exists", subnetV6Cidr);
                         } else {
                             log.error("添加子网ipv6前缀失败", e);
                             throw new OciException(-1, "添加子网ipv6前缀失败");
@@ -1717,12 +1964,12 @@ public class OracleInstanceFetcher implements Closeable {
                         .compartmentId(compartmentId)
                         .vcnId(vcnId)
                         .build());
-        if (listInternetGatewaysResponse.getItems().isEmpty()) {
+        if (CollectionUtil.isEmpty(listInternetGatewaysResponse.getItems())) {
             try {
                 InternetGateway gateway = createInternetGateway(virtualNetworkClient, compartmentId, vcn);
                 updateRouteRules(gateway, vcn);
             } catch (Exception e) {
-                log.error("用户：[{}] ，区域：[{}] 创建网关失败，原因：[{}]", user.getUsername(), user.getOciCfg().getRegion(), e.getLocalizedMessage());
+                log.error("用户:[{}],区域:[{}],创建网关失败,原因:{}", user.getUsername(), user.getOciCfg().getRegion(), e.getLocalizedMessage());
                 throw new OciException(-1, "创建网关失败");
             }
         } else {
@@ -1733,7 +1980,7 @@ public class OracleInstanceFetcher implements Closeable {
 
         try {
             // 安全列表（默认存在）
-            releaseSecurityRule(vcn, 6);
+            releaseSecurityRule(vcn, 6, "0.0.0.0/0", "::/0");
         } catch (Exception e) {
             log.error("release security rule error >>>>>>>>>>>>>>>>>> ", e);
         }
@@ -1745,6 +1992,34 @@ public class OracleInstanceFetcher implements Closeable {
                 .build());
 
         return createIpv6Response.getIpv6();
+    }
+
+    /**
+     * 更新或删除实例 freeformTags 中的 root 密码标签。
+     * password 为 null 或空字符串时删除该标签；否则写入新值。
+     */
+    public void updateRootPasswordTag(String instanceId, String password) {
+        // 先获取当前实例的全量 freeformTags，避免覆盖其他标签
+        Instance instance = getInstanceById(instanceId);
+        Map<String, String> tags = new HashMap<>(instance.getFreeformTags() != null
+                ? instance.getFreeformTags() : Collections.emptyMap());
+
+        if (StrUtil.isBlank(password)) {
+            // 密码为空 → 删除标签
+            tags.remove(OciInstanceConstant.TAG_ROOT_PASSWORD);
+        } else {
+            // 密码非空 → 写入或更新标签
+            tags.put(OciInstanceConstant.TAG_ROOT_PASSWORD, password);
+        }
+
+        computeClient.updateInstance(UpdateInstanceRequest.builder()
+                .instanceId(instanceId)
+                .updateInstanceDetails(UpdateInstanceDetails.builder()
+                        .freeformTags(tags)
+                        .build())
+                .build());
+//        log.info("用户:[{}],区域:[{}],实例:[{}] root-password 标签更新完成",
+//                user.getUsername(), user.getOciCfg().getRegion(), instanceId);
     }
 
     public void updateInstanceName(String instanceId, String name) {
@@ -1782,7 +2057,7 @@ public class OracleInstanceFetcher implements Closeable {
         blockstorageClient.updateBootVolume(UpdateBootVolumeRequest.builder()
                 .bootVolumeId(bootVolumeId)
                 .updateBootVolumeDetails(UpdateBootVolumeDetails.builder()
-                        .sizeInGBs(size)
+                        .sizeInGBs(size == 50L ? null : size)
                         .vpusPerGB(vpusPer)
                         .build())
                 .build());
@@ -1948,5 +2223,99 @@ public class OracleInstanceFetcher implements Closeable {
                         .egressSecurityRules(egressSecurityRuleList)
                         .build())
                 .build());
+    }
+
+    /**
+     * List all limit definitions and their current values / availability for the given compartment.
+     * Optionally filter by service name.
+     *
+     * @param serviceName optional service name filter, e.g. "compute"; null or blank means all services
+     * @return list of LimitDefinitionSummary objects
+     */
+    public List<LimitDefinitionSummary> listLimitDefinitions(String serviceName) {
+        List<LimitDefinitionSummary> result = new ArrayList<>();
+        String nextPageToken = null;
+        ListLimitDefinitionsRequest.Builder builder = ListLimitDefinitionsRequest.builder()
+                .compartmentId(compartmentId);
+        if (serviceName != null && !serviceName.isBlank()) {
+            builder.serviceName(serviceName);
+        }
+        do {
+            if (nextPageToken != null) {
+                builder.page(nextPageToken);
+            }
+            ListLimitDefinitionsResponse response = limitsClient.listLimitDefinitions(builder.build());
+            result.addAll(response.getItems());
+            nextPageToken = response.getOpcNextPage();
+        } while (nextPageToken != null);
+        return result;
+    }
+
+    /**
+     * Get the current limit value for a specific limit name and scope.
+     *
+     * @param serviceName service name, e.g. "compute"
+     * @param limitName   limit name, e.g. "vm-standard-e4-flex-ocpus"
+     * @return list of LimitValueSummary (may contain multiple items for AD-scoped limits)
+     */
+    public List<LimitValueSummary> listLimitValues(String serviceName, String limitName) {
+        List<LimitValueSummary> result = new ArrayList<>();
+        String nextPageToken = null;
+        ListLimitValuesRequest.Builder builder = ListLimitValuesRequest.builder()
+                .compartmentId(compartmentId)
+                .serviceName(serviceName)
+                .name(limitName);
+        do {
+            if (nextPageToken != null) {
+                builder.page(nextPageToken);
+            }
+            ListLimitValuesResponse response = limitsClient.listLimitValues(builder.build());
+            result.addAll(response.getItems());
+            nextPageToken = response.getOpcNextPage();
+        } while (nextPageToken != null);
+        return result;
+    }
+
+    /**
+     * Get the resource availability (used + available) for a specific limit.
+     *
+     * @param serviceName          service name
+     * @param limitName            limit name
+     * @param availabilityDomain   availability domain name; may be null for REGION or GLOBAL scope
+     * @return ResourceAvailability containing used and available counts
+     */
+    public ResourceAvailability getResourceAvailability(String serviceName, String limitName,
+                                                        String availabilityDomain) {
+        GetResourceAvailabilityRequest.Builder builder = GetResourceAvailabilityRequest.builder()
+                .compartmentId(compartmentId)
+                .serviceName(serviceName)
+                .limitName(limitName);
+        if (availabilityDomain != null && !availabilityDomain.isBlank()) {
+            builder.availabilityDomain(availabilityDomain);
+        }
+        GetResourceAvailabilityResponse response = limitsClient.getResourceAvailability(builder.build());
+        return response.getResourceAvailability();
+    }
+
+    /**
+     * List all available service names (e.g. "compute", "vcn", "object-storage") for the current
+     * compartment.  The returned list can be used to populate a service-name filter drop-down.
+     *
+     * @return list of ServiceSummary objects
+     */
+    public List<ServiceSummary> listServices() {
+        List<ServiceSummary> result = new ArrayList<>();
+        String nextPageToken = null;
+        ListServicesRequest.Builder builder = ListServicesRequest.builder()
+                .compartmentId(compartmentId);
+        do {
+            if (nextPageToken != null) {
+                builder.page(nextPageToken);
+            }
+            ListServicesResponse response = limitsClient.listServices(builder.build());
+            result.addAll(response.getItems());
+            nextPageToken = response.getOpcNextPage();
+        } while (nextPageToken != null);
+        return result;
     }
 }

@@ -7,8 +7,11 @@ import com.yohann.ocihelper.bean.params.oci.cfg.*;
 import com.yohann.ocihelper.bean.params.oci.instance.*;
 import com.yohann.ocihelper.bean.params.oci.securityrule.ReleaseSecurityRuleParams;
 import com.yohann.ocihelper.bean.params.oci.task.CreateTaskPageParams;
+import com.yohann.ocihelper.bean.params.oci.task.PauseCreateParams;
 import com.yohann.ocihelper.bean.params.oci.task.StopChangeIpParams;
 import com.yohann.ocihelper.bean.params.oci.task.StopCreateParams;
+import com.yohann.ocihelper.bean.params.oci.task.UpdateCreateTaskBatchParams;
+import com.yohann.ocihelper.bean.params.oci.task.UpdateCreateTaskParams;
 import com.yohann.ocihelper.bean.params.oci.volume.UpdateBootVolumeCfgParams;
 import com.yohann.ocihelper.bean.response.oci.task.CreateTaskRsp;
 import com.yohann.ocihelper.bean.response.oci.cfg.OciCfgDetailsRsp;
@@ -44,9 +47,17 @@ public interface IOciService {
 
     void stopCreateBatch(IdListParams params);
 
+    void updateCreateTask(UpdateCreateTaskParams params);
+
+    void updateCreateTaskBatch(UpdateCreateTaskBatchParams params);
+
+    void pauseCreateBatch(PauseCreateParams params);
+
+    void resumeCreateBatch(PauseCreateParams params);
+
     void createInstanceBatch(CreateInstanceBatchParams params);
 
-    void uploadCfg(UploadCfgParams params);
+    String uploadCfg(UploadCfgParams params);
 
     void updateInstanceState(UpdateInstanceStateParams params);
 
@@ -62,13 +73,25 @@ public interface IOciService {
 
     void updateInstanceName(UpdateInstanceNameParams params);
 
+    void updateInstanceRootPassword(UpdateInstanceRootPasswordParams params);
+
     void updateInstanceCfg(UpdateInstanceCfgParams params);
 
     void updateBootVolumeCfg(UpdateBootVolumeCfgParams params);
 
     String checkAlive();
 
+    void checkAliveBatch(IdListParams params);
+
     void updateCfgName(UpdateCfgNameParams params);
 
+    void updateCfgProxy(UpdateCfgProxyParams params);
+
+    void refreshPlanTypeBatch(IdListParams params);
+
+    void refreshCfgBatch(IdListParams params);
+
     String startVnc(StartVncParams params);
+
+    void autoRescue(AutoRescueParams params);
 }

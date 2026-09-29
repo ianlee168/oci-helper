@@ -1,6 +1,5 @@
 package com.yohann.ocihelper.bean.response.oci.tenant;
 
-import com.oracle.bmc.identity.model.User;
 import lombok.Data;
 
 import java.util.List;
@@ -21,6 +20,14 @@ public class TenantInfoRsp {
     private String upiIdcsCompatibilityLayerEndpoint;
     private List<String> regions;
     private List<TenantUserInfo> userList;
+    private String creatTime;
+    private Integer passwordExpiresAfter;
+    /** Test-mode recipient emails configured on the Identity Domain notification settings */
+    private List<String> notificationRecipients;
+    /** Whether domain notification test mode is currently enabled */
+    private Boolean notificationTestModeEnabled;
+    /** Subscription info */
+    private SubscriptionInfo subscriptionInfo;
 
     @Data
     public static class TenantUserInfo{
@@ -33,5 +40,23 @@ public class TenantInfoRsp {
            private String timeCreated;
            private String lastSuccessfulLoginTime;
            private String jsonStr;
+    }
+
+    @Data
+    public static class SubscriptionInfo {
+        /** FREE_TIER / PAYG */
+        private String planType;
+        /** Personal / Corporate / CorporateSubmitted */
+        private String accountType;
+        /** Promo / Submitted / Error / Upgraded */
+        private String upgradeState;
+        /** e.g. USD */
+        private String currencyCode;
+        /** Whether the user has completed payment intent (i.e. upgraded to PAYG) */
+        private Boolean isIntentToPay;
+        /** Whether corporate conversion is allowed */
+        private Boolean isCorporateConversionAllowed;
+        /** Subscription start time */
+        private String timeStart;
     }
 }

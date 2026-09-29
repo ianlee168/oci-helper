@@ -1,19 +1,35 @@
 # oci-helper 🐢
 
-> 一个基于 Oracle OCI SDK 🐢 开发的 web 端可视化甲骨文云助手，目前实现的功能有：批量添加多个租户配置、更改实例配置以及引导卷配置、附加ipv6、安全列表、实时流量查询（分钟级别）、根据多个 CIDR 网段更换实例公共IP、多租户同时批量抢机、Cloud Shell、断点续抢、备份恢复、日志实时查看、消息通知、MFA登录验证、更新 Cloudflare DNS 记录、TG 机器人操作等功能。
+[![visitors](https://komarev.com/ghpvc/?username=Yohann0617&color=green&base=20000&abbreviated=true)](https://github.com/Yohann0617)
+[![Stars](https://img.shields.io/github/stars/Yohann0617/oci-helper)](https://github.com/Yohann0617/oci-helper/stargazers)
+[![Issues](https://img.shields.io/github/issues/Yohann0617/oci-helper?logo=refinedgithub)](https://github.com/Yohann0617/oci-helper/issues)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg?logo=Apache)](LICENSE)
+
+[![OpenJDK](https://img.shields.io/badge/OpenJDK-21+-orange?logo=openjdk)](https://openjdk.org/projects/jdk/21)
+[![Springboot](https://img.shields.io/badge/Springboot-3+-green?logo=springboot)](https://spring.io/projects/spring-boot)
+[![Vue](https://img.shields.io/badge/Vue-2+-green?logo=vuedotjs)](https://vuejs.org)
+[![SQLite](https://img.shields.io/badge/SQLite-3+-blue?logo=sqlite)](https://sqlite.org)
+[![Maven](https://img.shields.io/badge/Maven-3+-red?logo=apachemaven)](https://maven.apache.org)
+[![Docker](https://img.shields.io/badge/Docker-28+-blue?logo=Docker)](https://www.docker.com)
+
+
+
+> oci-helper（Y探长） 是一个基于 Spring Boot 3 + JDK 21 开发的轻量级 OCI 管理面板，后端采用 SQLite 存储，整体通过 Docker 容器化运行，并支持一键脚本结合 docker-compose 快速部署，无需在本机安装额外环境。项目面向 Oracle Cloud（OCI）的日常运维与自动化场景，提供实例管理、网络与 IP 操作、任务持久化、日志实时查看、多租户管理等功能，帮助用户以更直观、安全、高效的方式管理云资源。得益于 Spring Boot 3 的现代化框架特性与 JDK 21 的虚拟线程机制，系统能够更好地应对高并发请求，降低资源消耗；结合 Docker 的隔离与一致性，保证了跨环境部署的安全与稳定。
 
 ## 🔔注意事项及免责声明
 
+- ⚠️建议在局域网下使用，不要暴露到公网。
 - ⚠️因开机、换IP频率过高而导致的封号本人概不负责。
 - ❤️开发此项目纯属个人爱好，无后门，放心使用。
 - 🔒强烈建议不要裸HTTP访问，应使用Nginx反向代理配置HTTPS访问。
 - 🔐建议使用密钥登录服务器，防止服务器被SSH爆破导致API数据及密钥泄露。
 - 📃记得定时清理docker日志~
+- 💬TG放货通知频道：https://t.me/oci_helper
 
 ## ⚙核心功能
 
 1. 支持同时**批量添加**多个租户配置信息，所有分页列表都支持**模糊搜索**、**状态筛选**。
-2. 支持更改实例配置、引导卷配置、一键附加ipv6、一键放行所有端口、实例列表、引导卷列表、**安全列表**、**实时流量统计**（分钟级别）等功能。⭐⭐
+2. 支持更改实例配置、引导卷配置、一键附加ipv6、一键放行所有端口、实例列表、引导卷列表、**一键开启免费AMD实例下行500Mbps**、**一键自动救援/缩小硬盘（默认47GB）**、**安全列表**、**实时流量统计**（分钟级别）、配额查询、租户管理、一键自动更新等功能。⭐⭐
 3. 根据多个**CIDR网段**更换实例公共IP，遇到请求频繁等异常会直接忽略，不影响下一次执行，直至更换到指定IP段的IP。支持**更换IP后自动更新 Cloudflare DNS** 记录功能。⭐⭐
 4. 多租户**同时批量开机**，后台一直运行，直至开机成功。⭐
 5. 支持**断点续抢**，配置以及抢机任务都保存在本地数据库，服务重启会继续执行抢机任务，无需重复配置。⭐⭐
@@ -24,30 +40,44 @@
 10. 支持分页查询、添加、更新、删除 **Cloudflare** 多个域名的 DNS 记录。⭐
 11. 支持 **Telegram 机器人**简单操作，服务成功部署后向机器人发送`/start`选择操作。
 12. 支持类似于甲骨文云 **Cloud Shell** 控制台功能，方便使用 netboot 救砖。⭐⭐
-
+13. 支持IP信息查询（部署成功后访问 http://ip:8818/ip-info ）以及首页显示全球服务器地图（可精确到街道的店铺），点亮全球。
+14. 支持 AI 聊天助手，基于 [硅基流动](https://cloud.siliconflow.cn/i/4ooSnEuY) 免费API，可免费无限次调用。
+15. 支持 Google 账号一键登录，如何配置请参考：[如何配置 Google 账号一键登录](./doc/GOOGLE_LOGIN_GUIDE.md) ⭐
 ## 💻一键 docker-compose 部署或更新
-
-- 安装完成后浏览器直接`ip:8818`即可访问（建议之后通过https访问），账号密码默认都是：`yohann`，
-如需修改请更改`/app/oci-helper/application.yml`中的配置并执行`docker restart oci-helper`重启docker容器即可。
-- 如需查看完整日志，执行：`docker logs oci-helper  >>  /app/oci-helper/oci-helper.log`导出日志文件自行查看。
 
 ```bash
 bash <(wget -qO- https://github.com/Yohann0617/oci-helper/releases/latest/download/sh_oci-helper_install.sh)
 ```
-
 > 此命令也可以用于更新镜像并重启容器，不会删除已有的配置。
+
+- 🔔 安装完成后浏览器直接访问 `http://ip:8818` 即可访问（建议之后通过https访问），账号密码可通过脚本进行修改。
+如需自己手动修改账号密码，更改 `/app/oci-helper/application.yml` 中的配置并执行 `docker restart oci-helper` 重启docker容器即可。
+- 📃 如需查看完整日志，执行：`docker logs oci-helper  >>  /app/oci-helper/oci-helper.log` 导出日志文件自行查看。
+
+🎄 部署完成后，`/app/oci-helper`的目录结构如下：
+```bash
+root@yohann:/app/oci-helper# tree
+.
+├── keys                            # 是一个目录，存放所有的pem秘钥文件
+├── application.yml                 # 项目配置文件，如需更改网页账号密码在此处更改，并执行 docker restart oci-helper 重启容器
+├── docker-compose.yml              # docker-compose部署所需配置文件
+├── oci-helper.db                   # 项目数据库文件
+└── update_version_trigger.flag     # 注意是一个文件，不是目录，用于版本自动更新
+````
 
 ### 📃更新日志
 
-> 1. 2025年06月04日——新增了支持 Cloud Shell 控制台功能，更新之前**需要先删除**旧的`docker-compose.yml`文件，再执行一键脚本。
-> 2. 2024年11月30日——数据库新增了一张表，TG、钉钉消息通知都改成了在web页面配置，如遇到配置异常，请删除`application.yml`文件，然后重新执行一键命令，修改自定义的账号密码，`docker restart oci-helper`重启容器即可。
+> 1. 2025年07月08日——新增一键升级功能，首次更新时**需要先删除**旧的`docker-compose.yml`文件，再执行一键脚本。如有将部署脚本下载到本地的用户也需要重新下载。具体参考releases中v3.0.1版本要求。
+> 2. 2025年07月04日——升级了部分依赖以及SDK，首次更新时**需要先删除**旧的`application.yml`文件，再执行一键脚本。具体参考releases中v3.0.0版本要求。
+> 3. 2025年06月04日——新增了支持 Cloud Shell 控制台功能，更新之前**需要先删除**旧的`docker-compose.yml`文件，再执行一键脚本。
+> 4. 2024年11月30日——数据库新增了一张表，TG、钉钉消息通知都改成了在web页面配置，如遇到配置异常，请删除`application.yml`文件，然后重新执行一键命令，修改自定义的账号密码，`docker restart oci-helper`重启容器即可。
 
 ### 🌏Nginx反向代理
 
-> 如果配置了HTTPS，又想要 VNC 连接救砖，这一步是必须的
+> 如果**需要配置HTTPS**，又想要 VNC 连接救砖，必须按照以下配置
 
 <details>
-    <summary> ☜ Read more 👨‍💻</summary>
+    <summary> ☜ 点击查看 👨‍💻</summary>
 
 #### 1. 修改 docker-compose.yaml
 > 这一步是保证服务端口只有服务器内部网络可以访问，外部无法直接通过IP+端口的方式访问服务，提高安全性。修改完之后需要执行 `cd /app/oci-helper && docker-compose down && docker-compose up -d` 重启服务或者直接再执行一次一键脚本。
@@ -55,6 +85,17 @@ bash <(wget -qO- https://github.com/Yohann0617/oci-helper/releases/latest/downlo
 `/app/oci-helper/docker-compose.yaml`：
 ```yaml
 services:
+  watcher:
+    image: ghcr.io/yohann0617/oci-helper-watcher:main
+    container_name: oci-helper-watcher
+    restart: always
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /usr/local/bin/docker-compose:/usr/local/bin/docker-compose
+      - /app/oci-helper/docker-compose.yml:/app/oci-helper/docker-compose.yml
+      - /app/oci-helper/update_version_trigger.flag:/app/oci-helper/update_version_trigger.flag
+      - /app/oci-helper/oci-helper.db:/app/oci-helper/oci-helper.db
+
   oci-helper:
     image: ghcr.io/yohann0617/oci-helper:master
     container_name: oci-helper
@@ -65,6 +106,7 @@ services:
       - /app/oci-helper/application.yml:/app/oci-helper/application.yml
       - /app/oci-helper/oci-helper.db:/app/oci-helper/oci-helper.db
       - /app/oci-helper/keys:/app/oci-helper/keys
+      - /app/oci-helper/update_version_trigger.flag:/app/oci-helper/update_version_trigger.flag
     networks:
       - app-network
       
@@ -120,7 +162,7 @@ networks:
 ## 👶手动部署（不推荐）
 
 <details>
-    <summary> ☜ Read more 👨‍💻</summary>
+    <summary> ☜ 点击查看 👨‍💻</summary>
 
 ### 1. 新建目录
 
@@ -132,7 +174,7 @@ mkdir -p /app/oci-helper/keys && cd /app/oci-helper
 
 ### 2. 下载文件
 
-下载[Releases](https://github.com/Yohann0617/oci-helper/releases/tag/deploy)中最新的`application.yml`、`oci-helper.db`、`docker-compose.yml`、`sh_oci-helper_install.sh`这4个文件到`/app/oci-helper`目录下，并修改`application.yml`部分配置。
+下载 [Releases](https://github.com/Yohann0617/oci-helper/releases/tag/deploy) 中的`application.yml`、`oci-helper.db`、`docker-compose.yml`以及**最新 Release 版本**的`sh_oci-helper_install.sh`这4个文件到`/app/oci-helper`目录下，并修改`application.yml`部分配置。
 `sh_oci-helper_install.sh`是部署脚本，可自行修改内容，执行之前记得先`chmod +x /app/oci-helper/sh_oci-helper_install.sh`。
 
 ### 3. docker-compose 部署或更新
@@ -147,8 +189,36 @@ chmod +x /app/oci-helper/sh_oci-helper_install.sh && cd /app/oci-helper && ./sh_
 
 ## 🔍页面展示
 
+> 部署脚本
+
+![image.png](./img/10-shell.png)
+
+> 部署在1C1G机器上运行一个月后资源占用情况
+
+![image.png](./img/10-status.png)
+
+> 主页
+
+![image.png](./img/1-home.png)
+
+> 新增配置
+
+![image.png](./img/3-add-1.png)
+
+> 更换IP并自动更新 Cloudflare 域名 DNS 记录
+
+![image.png](./img/3-instance-details.png)
+
+> 编辑实例
+
+![image.png](./img/3-instance-cfg.png)
+
+> TG操作
+
+![image.png](./img/9-tg-bot.jpg)
+
 <details>
-    <summary> ☜ 点击查看 👨‍💻</summary>
+    <summary> ☜ 点击查看更多 👨‍💻</summary>
 
 ![image.png](./img/0-login.png)
 ![image.png](./img/1-home.png)
@@ -168,19 +238,27 @@ chmod +x /app/oci-helper/sh_oci-helper_install.sh && cd /app/oci-helper && ./sh_
 ![image.png](./img/7-backup.png)
 ![image.png](./img/7-cf.png)
 ![image.png](./img/8-inform.png)
-![image.png](./img/9-tg-bot-1.jpg)
-![image.png](./img/9-tg-bot-2.jpg)
+![image.png](./img/9-tg-bot.jpg)
 
 </details>
 
-## ⭐Stargazers over time
+## ⭐Star History
 
-[![Stargazers over time](https://starchart.cc/Yohann0617/oci-helper.svg?variant=adaptive)](https://starchart.cc/Yohann0617/oci-helper)
+<a href="https://www.star-history.com/?repos=yohann0617%2Foci-helper&type=date&logscale=&legend=bottom-right">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=yohann0617/oci-helper&type=date&theme=dark&legend=bottom-right" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=yohann0617/oci-helper&type=date&legend=bottom-right" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=yohann0617/oci-helper&type=date&legend=bottom-right" />
+ </picture>
+</a>
 
-## 🙏特别鸣谢
-[![Powered by DartNode](https://dartnode.com/branding/DN-Open-Source-sm.png)](https://dartnode.com "Powered by DartNode - Free VPS for Open Source")
+## 🙏 特别鸣谢
+
+<p align="left">
+  <a href="https://dartnode.com?aff=FunkyDuckling896" title="Powered by DartNode - Free VPS for Open Source"><img src="https://cdn.nodeimage.com/i/1QvkwdBg0Tm9ATn4WG0s6jXnH0KXCF0B.webp" alt="DartNode" height="70"></a>
+  <a href="https://console.zmto.com/?affid=1600" title="Powered by ZMTO"><img src="https://cdn.nodeimage.com/i/4zeL2hJbVLGmFwbAfXlr63WnTLAtXGAc.webp" alt="ZMTO" height="70"></a>
+  <a href="https://yxvm.com/aff.php?aff=829" title="Powered by YxVM"><img src="https://cdn.nodeimage.com/i/586XdeDMwqemcrC8Qw7d6ITJIUYQgjJs.webp" alt="YxVM" height="70"></a>
+  <a href="https://www.nodeseek.com/" title="Powered by NodeSeek"><img src="https://cdn.nodeimage.com/i/xq07HPt3MvpzeKT2Du6o0KDoWcWlcYSY.webp" alt="NodeSeek" height="70"></a>
+</p>
 
 
-感谢 YxVM 对本项目的大力支持！ [高性价比服务器购买链接](https://yxvm.com/aff.php?aff=829)
-
-感谢 [NodeSupport](https://github.com/NodeSeekDev/NodeSupport) 赞助了本项目

@@ -8,12 +8,16 @@ import com.yohann.ocihelper.bean.params.oci.cfg.*;
 import com.yohann.ocihelper.bean.params.oci.instance.*;
 import com.yohann.ocihelper.bean.params.oci.securityrule.ReleaseSecurityRuleParams;
 import com.yohann.ocihelper.bean.params.oci.task.CreateTaskPageParams;
+import com.yohann.ocihelper.bean.params.oci.task.PauseCreateParams;
 import com.yohann.ocihelper.bean.params.oci.task.StopChangeIpParams;
 import com.yohann.ocihelper.bean.params.oci.task.StopCreateParams;
+import com.yohann.ocihelper.bean.params.oci.task.UpdateCreateTaskBatchParams;
+import com.yohann.ocihelper.bean.params.oci.task.UpdateCreateTaskParams;
 import com.yohann.ocihelper.bean.params.oci.volume.UpdateBootVolumeCfgParams;
 import com.yohann.ocihelper.bean.response.oci.task.CreateTaskRsp;
 import com.yohann.ocihelper.bean.response.oci.cfg.OciCfgDetailsRsp;
 import com.yohann.ocihelper.bean.response.oci.cfg.OciUserListRsp;
+import com.yohann.ocihelper.service.IInstanceService;
 import com.yohann.ocihelper.service.IOciService;
 import com.yohann.ocihelper.utils.CommonUtils;
 import org.springframework.validation.BindingResult;
@@ -23,7 +27,9 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
-import javax.annotation.Resource;
+import jakarta.annotation.Resource;
+
+import java.util.concurrent.ExecutorService;
 
 /**
  * <p>
@@ -39,6 +45,10 @@ public class OciController {
 
     @Resource
     private IOciService ociService;
+    @Resource
+    private IInstanceService instanceService;
+    @Resource
+    private ExecutorService virtualExecutor;
 
     @PostMapping(path = "/userPage")
     public ResponseData<Page<OciUserListRsp>> userPage(@Validated @RequestBody GetOciUserListParams params) {
@@ -57,10 +67,16 @@ public class OciController {
         return ResponseData.successData();
     }
 
+    @PostMapping(path = "/updateCfgProxy")
+    public ResponseData<Void> updateCfgProxy(@Validated @RequestBody UpdateCfgProxyParams params) {
+        ociService.updateCfgProxy(params);
+        return ResponseData.successData("更新代理配置成功");
+    }
+
     @PostMapping(path = "/uploadCfg")
     public ResponseData<Void> uploadCfg(@Validated UploadCfgParams params) {
-        ociService.uploadCfg(params);
-        return ResponseData.successData("上传配置成功");
+        String resultMsg = ociService.uploadCfg(params);
+        return ResponseData.successData(resultMsg);
     }
 
     @PostMapping(path = "/removeCfg")
@@ -103,16 +119,42 @@ public class OciController {
         return ResponseData.successData(ociService.createTaskPage(params), "获取开机任务列表成功");
     }
 
-    @PostMapping(path = "/stopCreateBatch")
+        @PostMapping(path = "/stopCreateBatch")
     public ResponseData<Void> stopCreateBatch(@Validated @RequestBody IdListParams params) {
         ociService.stopCreateBatch(params);
         return ResponseData.successData("停止开机任务成功");
     }
 
+        @PostMapping(path = "/updateCreateTask")
+    public ResponseData<Void> updateCreateTask(@Validated @RequestBody UpdateCreateTaskParams params) {
+        ociService.updateCreateTask(params);
+        return ResponseData.successData("修改开机任务成功");
+    }
+
+    @PostMapping(path = "/updateCreateTaskBatch")
+    public ResponseData<Void> updateCreateTaskBatch(@Validated @RequestBody UpdateCreateTaskBatchParams params) {
+        virtualExecutor.execute(() -> ociService.updateCreateTaskBatch(params));
+        return ResponseData.successData("批量修改开机任务已提交，正在错开重启中…");
+    }
+
+    @PostMapping(path = "/pauseCreateBatch")
+    public ResponseData<Void> pauseCreateBatch(@Validated @RequestBody PauseCreateParams params) {
+        ociService.pauseCreateBatch(params);
+        return ResponseData.successData("暂停开机任务成功");
+    }
+
+    @PostMapping(path = "/resumeCreateBatch")
+    public ResponseData<Void> resumeCreateBatch(@Validated @RequestBody PauseCreateParams params) {
+        ociService.resumeCreateBatch(params);
+        return ResponseData.successData("恢复开机任务成功");
+    }
+
     @PostMapping(path = "/createInstanceBatch")
     public ResponseData<Void> createInstanceBatch(@Validated @RequestBody CreateInstanceBatchParams params) {
-        ociService.createInstanceBatch(params);
-        return ResponseData.successData("批量创建开机任务成功");
+        // Submit asynchronously so the client gets an immediate response
+        // regardless of how many tasks are being scheduled.
+        virtualExecutor.execute(() -> ociService.createInstanceBatch(params));
+        return ResponseData.successData("批量开机任务已提交，正在逐步创建中…");
     }
 
     @PostMapping(path = "/updateInstanceState")
@@ -156,6 +198,13 @@ public class OciController {
         return ResponseData.successData("修改实例名称成功");
     }
 
+    @PostMapping(path = "/updateInstanceRootPassword")
+    public ResponseData<Void> updateInstanceRootPassword(@Validated @RequestBody UpdateInstanceRootPasswordParams params) {
+        ociService.updateInstanceRootPassword(params);
+        String action = (params.getPassword() == null || params.getPassword().isBlank()) ? "删除" : "更新";
+        return ResponseData.successData(action + " root 密码标签成功");
+    }
+
     @PostMapping(path = "/updateInstanceCfg")
     public ResponseData<Void> updateInstanceCfg(@Validated @RequestBody UpdateInstanceCfgParams params) {
         ociService.updateInstanceCfg(params);
@@ -173,8 +222,50 @@ public class OciController {
         return ResponseData.successData(ociService.checkAlive());
     }
 
+    @PostMapping(path = "/checkAliveBatch")
+    public ResponseData<Void> checkAliveBatch(@Validated @RequestBody IdListParams params) {
+        ociService.checkAliveBatch(params);
+        return ResponseData.successData("测活已提交，正在异步检测中，稍后刷新可查看结果…");
+    }
+
+    @PostMapping(path = "/refreshPlanTypeBatch")
+    public ResponseData<Void> refreshPlanTypeBatch(@Validated @RequestBody IdListParams params) {
+        ociService.refreshPlanTypeBatch(params);
+        return ResponseData.successData("套餐类型刷新成功");
+    }
+
+    @PostMapping(path = "/refreshCfgBatch")
+    public ResponseData<Void> refreshCfgBatch(@Validated @RequestBody IdListParams params) {
+        ociService.refreshCfgBatch(params);
+        return ResponseData.successData("更新配置已提交，正在异步刷新套餐类型与账户状态…");
+    }
+
     @PostMapping(path = "/startVnc")
     public ResponseData<String> startVnc(@Validated @RequestBody StartVncParams params) {
         return ResponseData.successData(ociService.startVnc(params));
+    }
+
+    @PostMapping(path = "/autoRescue")
+    public ResponseData<Void> autoRescue(@Validated @RequestBody AutoRescueParams params) {
+        ociService.autoRescue(params);
+        return ResponseData.successData();
+    }
+
+    @PostMapping(path = "/oneClick500M")
+    public ResponseData<Void> oneClick500M(@Validated @RequestBody CreateNetworkLoadBalancerParams params) {
+        instanceService.oneClick500M(params);
+        return ResponseData.successData("一键开启下行500Mbps任务下发成功");
+    }
+
+    @PostMapping(path = "/oneClickClose500M")
+    public ResponseData<Void> oneClickClose500M(@Validated @RequestBody Close500MParams params) {
+        instanceService.oneClickClose500M(params);
+        return ResponseData.successData("关闭下行500Mbps任务下发成功");
+    }
+
+    @PostMapping(path = "/updateInstanceShape")
+    public ResponseData<Void> updateInstanceShape(@Validated @RequestBody UpdateShapeParams params) {
+        instanceService.updateInstanceShape(params);
+        return ResponseData.successData("修改实例 Shape 成功");
     }
 }

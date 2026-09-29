@@ -5,6 +5,9 @@ import com.yohann.ocihelper.bean.Tuple2;
 import com.yohann.ocihelper.bean.dto.CreateInstanceDTO;
 import com.yohann.ocihelper.bean.dto.InstanceCfgDTO;
 import com.yohann.ocihelper.bean.dto.SysUserDTO;
+import com.yohann.ocihelper.bean.params.oci.instance.Close500MParams;
+import com.yohann.ocihelper.bean.params.oci.instance.CreateNetworkLoadBalancerParams;
+import com.yohann.ocihelper.bean.params.oci.instance.UpdateShapeParams;
 import com.yohann.ocihelper.config.OracleInstanceFetcher;
 
 import java.util.List;
@@ -98,4 +101,31 @@ public interface IInstanceService {
      * @param vpusPer    引导卷vpu [10,120]
      */
     void updateBootVolumeCfg(SysUserDTO sysUserDTO, String instanceId, long size, long vpusPer);
+
+    /**
+     * 一键开启500M
+     * @param params 参数
+     */
+    void oneClick500M(CreateNetworkLoadBalancerParams params);
+
+    /**
+     * 一键关闭500M
+     * @param params 参数
+     */
+    void oneClickClose500M(Close500MParams params);
+
+    /**
+     * 更新或删除实例 root 密码标签
+     *
+     * @param sysUserDTO oci配置
+     * @param instanceId 实例Id
+     * @param password   新密码，为 null 或空字符串时删除标签
+     */
+    void updateInstanceRootPassword(SysUserDTO sysUserDTO, String instanceId, String password);
+
+    /**
+     * 修改实例Shape
+     * @param params 参数
+     */
+    void updateInstanceShape(UpdateShapeParams params);
 }

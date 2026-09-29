@@ -21,4 +21,12 @@ public class UpdateSysCfgParams {
     private Boolean enableDailyBroadcast;
     private String dailyBroadcastCron;
     private Boolean enableVersionInform;
+
+    private String gjAiApi;
+    private String bootBroadcastToken;
+    private Boolean enableGoogleLogin;
+    private String googleClientId;
+    private String allowedEmails;
+    /** 全局代理地址，例如 http://host:port 或 socks5://host:port */
+    private String proxy;
 }

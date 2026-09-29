@@ -10,7 +10,10 @@
         t1.username,
         t1.tenant_name,
         t1.oci_region AS region,
-        t1.create_time,
+        t1.tenant_create_time as createTime,
+        t1.plan_type as planType,
+        t1.proxy,
+        t1.account_status as accountStatus,
         CASE
         WHEN MAX(t2.id) IS NOT NULL THEN 1
         ELSE 0
@@ -31,9 +34,29 @@
                 t1.oci_region like '%' || #{keyword} || '%' or
                 t1.tenant_name like '%' || #{keyword} || '%' )
             </if>
+            <if test="planType != null and planType != ''">
+                AND t1.plan_type = #{planType}
+            </if>
+            <if test="accountStatus != null and accountStatus == 'NONE'">
+                AND t1.account_status IS NULL
+            </if>
+            <if test="accountStatus != null and accountStatus != '' and accountStatus != 'NONE'">
+                AND t1.account_status = #{accountStatus}
+            </if>
         </where>
-        GROUP BY t1.id, t1.username,t1.tenant_name,t1.oci_region, t1.create_time
-        order by t1.username, t1.create_time DESC limit #{offset}, #{size}
+        GROUP BY t1.id, t1.username,t1.tenant_name,t1.oci_region, t1.create_time, t1.proxy
+        <choose>
+            <when test="sortOrder != null and sortOrder == 'ASC'">
+                order by t1.tenant_create_time ASC
+            </when>
+            <when test="sortOrder != null and sortOrder == 'DESC'">
+                order by t1.tenant_create_time DESC
+            </when>
+            <otherwise>
+                order by t1.username DESC
+            </otherwise>
+        </choose>
+        limit #{offset}, #{size}
     </select>
     <select id="userPageTotal" resultType="java.lang.Long">
         SELECT COUNT(DISTINCT t1.id)
@@ -52,6 +75,15 @@
                 and (t1.username like '%' || #{keyword} || '%' or
                 t1.oci_region like '%' || #{keyword} || '%' or
                 t1.tenant_name like '%' || #{keyword} || '%' )
+            </if>
+            <if test="planType != null and planType != ''">
+                AND t1.plan_type = #{planType}
+            </if>
+            <if test="accountStatus != null and accountStatus == 'NONE'">
+                AND t1.account_status IS NULL
+            </if>
+            <if test="accountStatus != null and accountStatus != '' and accountStatus != 'NONE'">
+                AND t1.account_status = #{accountStatus}
             </if>
         </where>
     </select>

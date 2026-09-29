@@ -32,7 +32,14 @@ public class CreateTaskRsp {
 
     private String operationSystem;
 
+    private String rootPassword;
+
     private String createTime;
 
     private String counts;
+
+    /**
+     * Task paused flag: 0 = running, 1 = paused
+     */
+    private Integer paused;
 }

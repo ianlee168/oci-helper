@@ -23,7 +23,7 @@ import com.yohann.ocihelper.utils.CommonUtils;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
-import javax.annotation.Resource;
+import jakarta.annotation.Resource;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -55,10 +55,10 @@ public class TrafficServiceImpl implements ITrafficService {
             GetTrafficDataRsp rsp = new GetTrafficDataRsp();
             rsp.setTime(inTrafficData.stream().map(ValueLabelDTO::getLabel).collect(Collectors.toList()));
             rsp.setInbound(inTrafficData.stream()
-                    .map(x -> CommonUtils.formatBytes(Long.parseLong(x.getValue()), "MB"))
+                    .map(x -> CommonUtils.formatBytes(Long.parseLong(x.getValue()), "GB"))
                     .collect(Collectors.toList()));
             rsp.setOutbound(outTrafficData.stream()
-                    .map(x -> CommonUtils.formatBytes(Long.parseLong(x.getValue()), "MB"))
+                    .map(x -> CommonUtils.formatBytes(Long.parseLong(x.getValue()), "GB"))
                     .collect(Collectors.toList()));
             return rsp;
         } catch (Exception e) {

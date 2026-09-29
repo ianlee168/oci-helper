@@ -22,11 +22,13 @@ import com.yohann.ocihelper.utils.CustomExpiryGuavaCache;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
-import javax.annotation.Resource;
+import jakarta.annotation.Resource;
+
 import java.util.Comparator;
 import java.util.List;
-import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
 import java.util.stream.Collectors;
+
 
 /**
  * <p>
@@ -44,6 +46,8 @@ public class BootVolumeServiceImpl implements IBootVolumeService {
     private ISysService sysService;
     @Resource
     private CustomExpiryGuavaCache<String, Object> customCache;
+    @Resource
+    private ExecutorService virtualExecutor;
 
     @Override
     public Page<BootVolumeListPage.BootVolumeInfo> bootVolumeListPage(BootVolumePageParams params) {
@@ -93,13 +97,13 @@ public class BootVolumeServiceImpl implements IBootVolumeService {
     @Override
     public void terminateBootVolume(TerminateBootVolumeParams params) {
         SysUserDTO sysUserDTO = sysService.getOciUser(params.getOciCfgId());
-        CompletableFuture.runAsync(() -> {
+        virtualExecutor.execute(() -> {
             params.getBootVolumeIds().parallelStream().forEach(id -> {
                 String bvName = null;
                 try (OracleInstanceFetcher fetcher = new OracleInstanceFetcher(sysUserDTO)) {
                     fetcher.terminateBootVolume(id);
                     bvName = fetcher.getBootVolumeById(id).getDisplayName();
-                    log.info("用户：[{}] ， 区域：[{}] ，正在终止引导卷：[{}]",
+                    log.info("用户：[{}]，区域：[{}]，正在终止引导卷：[{}]",
                             sysUserDTO.getUsername(), sysUserDTO.getOciCfg().getRegion(), bvName);
                 } catch (Exception e) {
                     log.error("引导卷：{} 终止异常", bvName, e);

@@ -4,12 +4,16 @@ import cn.hutool.core.collection.CollectionUtil;
 import cn.hutool.core.io.FileUtil;
 import cn.hutool.core.util.IdUtil;
 import cn.hutool.core.util.StrUtil;
+import cn.hutool.http.HttpUtil;
+import cn.hutool.json.JSONObject;
+import cn.hutool.json.JSONUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.oracle.bmc.Region;
 import com.oracle.bmc.identity.model.Tenancy;
 import com.oracle.bmc.identity.requests.GetTenancyRequest;
 import com.yohann.ocihelper.bean.constant.CacheConstant;
 import com.yohann.ocihelper.bean.dto.SysUserDTO;
+import com.yohann.ocihelper.bean.entity.IpData;
 import com.yohann.ocihelper.bean.entity.OciCreateTask;
 import com.yohann.ocihelper.bean.entity.OciKv;
 import com.yohann.ocihelper.bean.entity.OciUser;
@@ -26,22 +30,18 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
-import org.springframework.context.annotation.Lazy;
 import org.springframework.scheduling.TaskScheduler;
 import org.springframework.scheduling.support.CronTrigger;
 import org.springframework.stereotype.Component;
 import org.telegram.telegrambots.longpolling.TelegramBotsLongPollingApplication;
-import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 
-import javax.annotation.Resource;
-import java.io.FileWriter;
-import java.io.IOException;
+import jakarta.annotation.Resource;
+
 import java.time.LocalDateTime;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.List;
-import java.util.Optional;
+import java.time.temporal.ChronoUnit;
+import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
@@ -69,11 +69,15 @@ public class OciTask implements ApplicationRunner {
     @Resource
     private ISysService sysService;
     @Resource
+    private IIpDataService ipDataService;
+    @Resource
     private IOciCreateTaskService createTaskService;
     @Resource
     private TaskScheduler taskScheduler;
     @Resource
     private SQLiteHelper sqLiteHelper;
+    @Resource
+    private ExecutorService virtualExecutor;
 
     private static volatile boolean isPushedLatestVersion = false;
     public static volatile TelegramBotsLongPollingApplication botsApplication;
@@ -96,17 +100,28 @@ public class OciTask implements ApplicationRunner {
         pushVersionUpdateMsg(kvService, sysService);
         dailyBroadcastTask();
         supportOciUnknownRegionTask();
+        initMapData();
     }
 
-    private void startTgBog() {
-        CompletableFuture.runAsync(() -> {
+        private void startTgBog() {
+        virtualExecutor.execute(() -> {
             OciKv tgToken = kvService.getOne(new LambdaQueryWrapper<OciKv>().eq(OciKv::getCode, SysCfgEnum.SYS_TG_BOT_TOKEN.getCode()));
             OciKv tgChatId = kvService.getOne(new LambdaQueryWrapper<OciKv>().eq(OciKv::getCode, SysCfgEnum.SYS_TG_CHAT_ID.getCode()));
-
+            if (null == tgToken || null == tgChatId) {
+                return;
+            }
             if (StrUtil.isNotBlank(tgToken.getValue()) && StrUtil.isNotBlank(tgChatId.getValue())) {
-                botsApplication = new TelegramBotsLongPollingApplication();
+                // 获取全局代理配置
+                OciKv proxyKv = kvService.getOne(new LambdaQueryWrapper<OciKv>().eq(OciKv::getCode, SysCfgEnum.SYS_PROXY.getCode()));
+                String globalProxy = proxyKv != null ? proxyKv.getValue() : null;
+                // 将带代理的 OkHttpClient 传入 TelegramBotsLongPollingApplication，
+                // 使得 deleteWebhook 和长轮询请求同样走代理，而不是直连。
+                okhttp3.OkHttpClient okHttpClient = TgBot.buildOkHttpClient(globalProxy);
+                botsApplication = okHttpClient != null
+                        ? new TelegramBotsLongPollingApplication(com.fasterxml.jackson.databind.ObjectMapper::new, () -> okHttpClient)
+                        : new TelegramBotsLongPollingApplication();
                 try {
-                    botsApplication.registerBot(tgToken.getValue(), new TgBot(tgToken.getValue(), tgChatId.getValue()));
+                    botsApplication.registerBot(tgToken.getValue(), new TgBot(tgToken.getValue(), tgChatId.getValue(), globalProxy));
                     Thread.currentThread().join();
                 } catch (Exception e) {
                     throw new RuntimeException(e);
@@ -126,11 +141,20 @@ public class OciTask implements ApplicationRunner {
     private void updateUserInDb() {
         sqLiteHelper.addColumnIfNotExists("oci_user", "tenant_name", "VARCHAR(64) NULL");
         sqLiteHelper.addColumnIfNotExists("oci_create_task", "oci_region", "VARCHAR(64) NULL");
-        CompletableFuture.runAsync(() -> {
+        sqLiteHelper.addColumnIfNotExists("oci_user", "tenant_create_time", "datetime NULL");
+        sqLiteHelper.addColumnIfNotExists("oci_user", "plan_type", "VARCHAR(32) NULL");
+        sqLiteHelper.addColumnIfNotExists("oci_create_task", "paused", "INTEGER DEFAULT 0");
+        sqLiteHelper.addColumnIfNotExists("oci_user", "proxy", "VARCHAR(256) NULL");
+        sqLiteHelper.addColumnIfNotExists("oci_user", "account_status", "VARCHAR(16) NULL");
+        virtualExecutor.execute(() -> {
             List<OciUser> ociUsers = userService.list(new LambdaQueryWrapper<OciUser>()
+                    .isNull(OciUser::getTenantCreateTime)
+                    .or()
                     .isNull(OciUser::getTenantName)
-                    .or().eq(OciUser::getTenantName, ""));
-            if (!ociUsers.isEmpty()) {
+                    .or()
+                    .eq(OciUser::getTenantName, "")
+            );
+            if (CollectionUtil.isNotEmpty(ociUsers)) {
                 userService.updateBatchById(ociUsers.parallelStream().peek(x -> {
                     SysUserDTO sysUserDTO = sysService.getOciUser(x.getId());
                     try (OracleInstanceFetcher fetcher = new OracleInstanceFetcher(sysUserDTO)) {
@@ -138,52 +162,90 @@ public class OciTask implements ApplicationRunner {
                                 .tenancyId(sysUserDTO.getOciCfg().getTenantId())
                                 .build()).getTenancy();
                         x.setTenantName(tenancy.getName());
+                        x.setTenantCreateTime(LocalDateTime.parse(fetcher.getRegisteredTime(), CommonUtils.DATETIME_FMT_NORM));
                     } catch (Exception e) {
                         log.error("更新配置：{} 失败", x.getUsername());
                     }
                 }).collect(Collectors.toList()));
             }
         });
+        // Back-fill plan_type for existing rows that have never been filled
+        virtualExecutor.execute(() -> {
+            List<OciUser> needPlanType = userService.list(new LambdaQueryWrapper<OciUser>()
+                    .isNull(OciUser::getPlanType));
+            if (CollectionUtil.isEmpty(needPlanType)) {
+                return;
+            }
+            userService.updateBatchById(needPlanType.parallelStream().peek(x -> {
+                SysUserDTO sysUserDTO = sysService.getOciUser(x.getId());
+                try (OracleInstanceFetcher fetcher = new OracleInstanceFetcher(sysUserDTO)) {
+                    com.oracle.bmc.ospgateway.model.Subscription sub = fetcher.getSubscriptionInfo();
+                    if (sub != null && sub.getPlanType() != null) {
+                        x.setPlanType(sub.getPlanType().getValue());
+                        log.info("更新配置:[{}] plan_type 成功", x.getUsername());
+                    }
+                } catch (Exception e) {
+                    log.warn("回填配置:[{}] plan_type 失败: {}", x.getUsername(), e.getMessage());
+                }
+            }).collect(Collectors.toList()));
+        });
     }
 
     private void cleanAndRestartTask() {
-        CompletableFuture.runAsync(() -> {
-            Optional.ofNullable(createTaskService.list())
-                    .filter(CollectionUtil::isNotEmpty).orElseGet(Collections::emptyList)
-                    .forEach(task -> {
-                        if (task.getCreateNumbers() <= 0) {
-                            createTaskService.removeById(task.getId());
-                        } else {
-                            OciUser ociUser = userService.getById(task.getUserId());
-                            SysUserDTO sysUserDTO = SysUserDTO.builder()
-                                    .ociCfg(SysUserDTO.OciCfg.builder()
-                                            .userId(ociUser.getOciUserId())
-                                            .tenantId(ociUser.getOciTenantId())
-                                            .region(StrUtil.isBlank(task.getOciRegion()) ? ociUser.getOciRegion() : task.getOciRegion())
-                                            .fingerprint(ociUser.getOciFingerprint())
-                                            .privateKeyPath(ociUser.getOciKeyPath())
-                                            .build())
-                                    .taskId(task.getId())
-                                    .username(ociUser.getUsername())
-                                    .ocpus(task.getOcpus())
-                                    .memory(task.getMemory())
-                                    .disk(Long.valueOf(task.getDisk()))
-                                    .architecture(task.getArchitecture())
-                                    .interval(Long.valueOf(task.getInterval()))
-                                    .createNumbers(task.getCreateNumbers())
-                                    .operationSystem(task.getOperationSystem())
-                                    .rootPassword(task.getRootPassword())
-                                    .build();
-                            addTask(CommonUtils.CREATE_TASK_PREFIX + task.getId(), () ->
-                                            execCreate(sysUserDTO, sysService, instanceService, createTaskService),
-                                    0, task.getInterval(), TimeUnit.SECONDS);
+        virtualExecutor.execute(() -> {
+            List<OciCreateTask> tasks = Optional.ofNullable(createTaskService.list())
+                    .filter(CollectionUtil::isNotEmpty).orElseGet(Collections::emptyList);
+            // Stagger task restoration: each task is submitted 5 seconds after the previous one
+            // to avoid a thundering-herd of API calls right after startup / backup restore.
+            for (int i = 0; i < tasks.size(); i++) {
+                OciCreateTask task = tasks.get(i);
+                final long delaySeconds = (long) i * 5;
+                CREATE_INSTANCE_POOL.schedule(() -> {
+                    if (task.getCreateNumbers() <= 0) {
+                        createTaskService.removeById(task.getId());
+                    } else if (task.getPaused() != null && task.getPaused() == 1) {
+                        // Skip paused tasks — keep them in DB but don't schedule execution
+                        log.info("【开机任务】任务 [{}] 处于暂停状态，跳过启动", task.getId());
+                                        } else {
+                        SysUserDTO sysUserDTO = sysService.getOciUser(task.getUserId());
+                        // 覆盖任务相关字段，同时保留代理、区域等配置信息
+                        if (StrUtil.isNotBlank(task.getOciRegion())) {
+                            sysUserDTO.getOciCfg().setRegion(task.getOciRegion());
                         }
-                    });
+                        sysUserDTO.setTaskId(task.getId());
+                        sysUserDTO.setOcpus(task.getOcpus());
+                        sysUserDTO.setMemory(task.getMemory());
+                        sysUserDTO.setDisk(task.getDisk().equals(50) ? null : Long.valueOf(task.getDisk()));
+                        sysUserDTO.setArchitecture(task.getArchitecture());
+                        sysUserDTO.setInterval(Long.valueOf(task.getInterval()));
+                        sysUserDTO.setCreateNumbers(task.getCreateNumbers());
+                        sysUserDTO.setOperationSystem(task.getOperationSystem());
+                                                sysUserDTO.setRootPassword(task.getRootPassword());
+
+                        // Pre-seed the attempt counter with an estimated historical count
+                        // so that after a service restart the displayed count is not reset to 0.
+                        // Formula: floor((now - createTime) / intervalSeconds)
+                        if (task.getCreateTime() != null && task.getInterval() != null && task.getInterval() > 0) {
+                            long elapsedSeconds = ChronoUnit.SECONDS.between(task.getCreateTime(), LocalDateTime.now());
+                            long estimatedCount = elapsedSeconds / task.getInterval();
+                            if (estimatedCount > 0) {
+                                TEMP_MAP.put(CommonUtils.CREATE_COUNTS_PREFIX + task.getId(), estimatedCount);
+                                log.info("【开机任务】任务 [{}] 服务重启，预估历史执行次数：[{}] 次，后续将在此基础上累加",
+                                        task.getId(), estimatedCount);
+                            }
+                        }
+
+                        addTask(CommonUtils.CREATE_TASK_PREFIX + task.getId(), () ->
+                                        execCreate(sysUserDTO, sysService, instanceService, createTaskService),
+                                0, task.getInterval(), TimeUnit.SECONDS);
+                    }
+                }, delaySeconds, TimeUnit.SECONDS);
+            }
         });
     }
 
     private void initGenMfaPng() {
-        CompletableFuture.runAsync(() -> {
+        virtualExecutor.execute(() -> {
             Optional.ofNullable(kvService.getOne(new LambdaQueryWrapper<OciKv>()
                     .eq(OciKv::getCode, SysCfgEnum.SYS_MFA_SECRET.getCode()))).ifPresent(mfa -> {
                 String qrCodeURL = CommonUtils.generateQRCodeURL(mfa.getValue(), account, "oci-helper");
@@ -193,7 +255,7 @@ public class OciTask implements ApplicationRunner {
     }
 
     private void saveVersion() {
-        CompletableFuture.runAsync(() -> {
+        virtualExecutor.execute(() -> {
             String latestVersion = CommonUtils.getLatestVersion();
             OciKv oldVersion = kvService.getOne(new LambdaQueryWrapper<OciKv>()
                     .eq(OciKv::getCode, SysCfgEnum.SYS_INFO_VERSION.getCode())
@@ -217,7 +279,7 @@ public class OciTask implements ApplicationRunner {
                 .eq(OciKv::getType, SysCfgTypeEnum.SYS_INFO.getCode())
                 .select(OciKv::getValue), String::valueOf);
         log.info(String.format("【oci-helper】服务启动成功~ 当前版本：%s 最新版本：%s", nowVersion, latestVersion));
-        sysService.sendMessage(String.format("【oci-helper】服务启动成功🎉🎉\n当前版本：%s\n最新版本：%s\n发送 /start 操作机器人🤖", nowVersion, latestVersion));
+        sysService.sendMessage(String.format("【oci-helper】服务启动成功🎉🎉\n\n当前版本：%s\n最新版本：%s\n发送 /start 操作机器人🤖\n放货通知频道：https://t.me/oci_helper", nowVersion, latestVersion));
     }
 
     public static void pushVersionUpdateMsg(IOciKvService kvService, ISysService sysService) {
@@ -240,7 +302,7 @@ public class OciTask implements ApplicationRunner {
             if (!now.equals(latest)) {
                 log.warn(String.format("【oci-helper】版本更新啦！！！当前版本：%s 最新版本：%s", now, latest));
                 if (!isPushedLatestVersion) {
-                    sysService.sendMessage(String.format("🔔【oci-helper】版本更新啦！！！\n当前版本：%s\n最新版本：%s\n一键脚本：%s\n更新内容：\n%s",
+                    sysService.sendMessage(String.format("🔔【oci-helper】版本更新啦！！！\n\n当前版本：%s\n最新版本：%s\n一键脚本：%s\n\n更新内容：\n%s",
                             now, latest,
                             "bash <(wget -qO- https://github.com/Yohann0617/oci-helper/releases/latest/download/sh_oci-helper_install.sh)",
                             CommonUtils.getLatestVersionBody()));
@@ -271,17 +333,17 @@ public class OciTask implements ApplicationRunner {
         ScheduledFuture<?> scheduled = taskScheduler.schedule(() -> {
             String message = "【每日播报】\n" +
                     "\n" +
-                    "时间：\t%s\n" +
-                    "总API配置数：\t%s\n" +
-                    "失效API配置数：\t%s\n" +
-                    "失效的API配置：\t%s\n" +
-                    "正在执行的开机任务：\n" +
+                    "\uD83D\uDD58 时间：\t%s\n" +
+                    "\uD83D\uDD11 总API配置数：\t%s\n" +
+                    "❌ 失效API配置数：\t%s\n" +
+                    "⚠\uFE0F 失效的API配置：\t\n- %s\n" +
+                    "\uD83D\uDECE 正在执行的开机任务：\n" +
                     "%s\n";
             List<String> ids = userService.listObjs(new LambdaQueryWrapper<OciUser>()
                     .isNotNull(OciUser::getId)
                     .select(OciUser::getId), String::valueOf);
 
-            CompletableFuture<List<?>> fails = CompletableFuture.supplyAsync(() -> {
+            CompletableFuture<List<String>> fails = CompletableFuture.supplyAsync(() -> {
                 if (ids.isEmpty()) {
                     return Collections.emptyList();
                 }
@@ -294,7 +356,7 @@ public class OciTask implements ApplicationRunner {
                     }
                     return false;
                 }).map(id -> sysService.getOciUser(id).getUsername()).collect(Collectors.toList());
-            });
+            }, virtualExecutor);
 
             CompletableFuture<String> task = CompletableFuture.supplyAsync(() -> {
                 List<OciCreateTask> ociCreateTaskList = createTaskService.list();
@@ -309,7 +371,7 @@ public class OciTask implements ApplicationRunner {
                             x.getOcpus().longValue(), x.getMemory().longValue(), x.getDisk(), x.getCreateNumbers(),
                             CommonUtils.getTimeDifference(x.getCreateTime()), counts == null ? "0" : counts);
                 }).collect(Collectors.joining("\n"));
-            });
+            }, virtualExecutor);
 
             CompletableFuture.allOf(fails, task).join();
 
@@ -317,7 +379,7 @@ public class OciTask implements ApplicationRunner {
                     LocalDateTime.now().format(CommonUtils.DATETIME_FMT_NORM),
                     CollectionUtil.isEmpty(ids) ? 0 : ids.size(),
                     fails.join().size(),
-                    fails.join(),
+                    String.join("\n- ", fails.join()),
                     task.join()
             ));
         }, new CronTrigger(null == dbc ? CacheConstant.TASK_CRON : dbc.getValue()));
@@ -326,7 +388,7 @@ public class OciTask implements ApplicationRunner {
     }
 
     private void supportOciUnknownRegionTask() {
-        CompletableFuture.runAsync(() -> {
+        virtualExecutor.execute(() -> {
             Arrays.stream(OciUnSupportRegionEnum.values()).parallel()
                     .forEach(x -> {
                         try {
@@ -336,6 +398,76 @@ public class OciTask implements ApplicationRunner {
                             log.info("support new region: [{}] successfully", x.getRegionId());
                         }
                     });
+        });
+    }
+
+    private void initMapData() {
+        virtualExecutor.execute(() -> {
+            try {
+                // Use ip-api.com - free, no auth required, 45 req/min
+                String jsonStr = HttpUtil.get("http://ip-api.com/json/?fields=status,message,country,regionName,city,lat,lon,org,as,query");
+
+                // Validate response
+                if (StrUtil.isBlank(jsonStr)) {
+                    log.warn("Failed to get IP data: empty response");
+                    return;
+                }
+
+                // Check if response is valid JSON (not XML or error page)
+                if (!jsonStr.trim().startsWith("{")) {
+                    log.warn("Failed to get IP data: invalid JSON response");
+                    return;
+                }
+
+                JSONObject json = JSONUtil.parseObj(jsonStr);
+
+                // Check if API request was successful
+                String status = json.getStr("status");
+                if (!"success".equals(status)) {
+                    log.warn("IP API returned error status: {}, message: {}", status, json.getStr("message"));
+                    return;
+                }
+
+                // Validate required fields
+                if (!json.containsKey("query")) {
+                    log.warn("IP API response missing required field 'query'");
+                    return;
+                }
+
+                String ip = json.getStr("query");
+
+                IpData ipData = new IpData();
+                ipData.setId(IdUtil.getSnowflakeNextIdStr());
+                ipData.setIp(ip);
+                ipData.setCountry(json.getStr("country"));
+                ipData.setArea(json.getStr("regionName"));
+                ipData.setCity(json.getStr("city"));
+                ipData.setOrg(json.getStr("org"));
+                ipData.setAsn(json.getStr("as"));
+
+                // Safely parse latitude and longitude
+                try {
+                    Double lat = json.getDouble("lat");
+                    Double lon = json.getDouble("lon");
+                    if (lat != null && lon != null) {
+                        ipData.setLat(lat);
+                        ipData.setLng(lon);
+                    }
+                } catch (Exception e) {
+                    log.warn("Failed to parse latitude/longitude: {}", e.getMessage());
+                }
+
+                List<IpData> ipDataList = ipDataService.list(new LambdaQueryWrapper<IpData>()
+                        .eq(IpData::getIp, ip));
+                if (CollectionUtil.isNotEmpty(ipDataList)) {
+                    ipDataService.remove(new LambdaQueryWrapper<IpData>().eq(IpData::getIp, ip));
+                }
+                ipDataService.save(ipData);
+                log.info("新增地图IP数据：{} 成功", ipData.getIp());
+
+            } catch (Exception e) {
+                log.error("初始化地图IP数据失败", e);
+            }
         });
     }
 }

@@ -17,4 +17,10 @@ public class GetOciUserListParams {
     private long currentPage;
     private long pageSize;
     private Integer isEnableCreate;
+    /** Filter by plan type: PAYG / FREE_TIER, null means all */
+    private String planType;
+    /** Filter by account status: ACTIVE / INACTIVE / NONE(null records), null means all */
+    private String accountStatus;
+    /** Sort order for tenant_create_time: ASC / DESC, default DESC */
+    private String sortOrder;
 }

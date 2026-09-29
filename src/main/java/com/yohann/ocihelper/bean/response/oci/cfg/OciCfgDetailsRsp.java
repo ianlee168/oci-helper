@@ -26,6 +26,7 @@ public class OciCfgDetailsRsp {
     private String region;
     private List<InstanceInfo> instanceList;
     private List<CfCfg> cfCfgList;
+    private List<NetLoadBalancer> nlbList;
 
     @Data
     @Builder
@@ -45,6 +46,8 @@ public class OciCfgDetailsRsp {
         private String state;
         private String availabilityDomain;
         private List<InstanceVnicInfo> vnicList;
+        /** 存储在实例自由标签中的 root 密码，开机成功后可通过控制台查看 */
+        private String rootPassword;
     }
 
     @Data
@@ -61,5 +64,12 @@ public class OciCfgDetailsRsp {
     public static class CfCfg {
         private String cfCfgId;
         private String domain;
+    }
+
+    @Data
+    public static class NetLoadBalancer {
+        private String name;
+        private String status;
+        private String publicIp;
     }
 }

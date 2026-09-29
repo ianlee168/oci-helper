@@ -2,8 +2,8 @@ package com.yohann.ocihelper.bean.params.oci.instance;
 
 import lombok.Data;
 
-import javax.validation.constraints.NotBlank;
-import javax.validation.constraints.NotNull;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
 
 /**
  * <p>
@@ -22,17 +22,19 @@ public class CreateInstanceParams {
     private String ocpus;
     @NotBlank(message = "内存不能为空")
     private String memory;
-    @NotBlank(message = "磁盘空间不能为空")
-    private String disk;
+    @NotNull(message = "磁盘空间不能为空")
+    private Integer disk;
     @NotBlank(message = "系统架构不能为空")
     private String architecture;
     @NotNull(message = "时间间隔不能为空")
     private Integer interval;
     @NotNull(message = "创建数目不能为空")
     private Integer createNumbers;
-    @NotNull(message = "系统类型不能为空")
+    @NotBlank(message = "系统类型不能为空")
     private String operationSystem;
-    @NotNull(message = "root密码不能为空")
+    @NotBlank(message = "root密码不能为空")
     private String rootPassword;
+
+    private boolean joinChannelBroadcast = true;
 
 }

@@ -29,6 +29,8 @@ public class OciUser implements Serializable {
 
     private String tenantName;
 
+    private LocalDateTime tenantCreateTime;
+
     private String ociTenantId;
 
     private String ociUserId;
@@ -39,7 +41,18 @@ public class OciUser implements Serializable {
 
     private String ociKeyPath;
 
+    private String planType;
+
     private LocalDateTime createTime;
+
+    /** 单独代理地址，优先级高于全局代理，例如 http://host:port 或 socks5://host:port */
+    private String proxy;
+
+    /**
+     * Account status: "ACTIVE" means alive check passed, "INACTIVE" means failed, null means not yet checked.
+     * 账户状态：ACTIVE=活跃，INACTIVE=失效，null=未检测
+     */
+    private String accountStatus;
 
     @TableField(exist = false)
     private static final long serialVersionUID = 1L;

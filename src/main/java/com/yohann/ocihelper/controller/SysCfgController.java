@@ -4,13 +4,14 @@ import com.yohann.ocihelper.bean.ResponseData;
 import com.yohann.ocihelper.bean.params.sys.*;
 import com.yohann.ocihelper.bean.response.sys.GetGlanceRsp;
 import com.yohann.ocihelper.bean.response.sys.GetSysCfgRsp;
+import com.yohann.ocihelper.bean.response.sys.LoginRsp;
 import com.yohann.ocihelper.service.ISysService;
 import com.yohann.ocihelper.utils.CommonUtils;
 import org.springframework.validation.BindingResult;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 
-import javax.annotation.Resource;
+import jakarta.annotation.Resource;
 
 /**
  * @projectName: oci-helper
@@ -27,8 +28,14 @@ public class SysCfgController {
     private ISysService sysService;
 
     @PostMapping(path = "/login")
-    public ResponseData<String> addCfg(@Validated @RequestBody LoginParams params) {
+    public ResponseData<LoginRsp> addCfg(@Validated @RequestBody LoginParams params) {
         return ResponseData.successData(sysService.login(params), "登录成功");
+    }
+
+    @PostMapping(path = "/updateVersion")
+    public ResponseData<Void> updateVersion() {
+        sysService.updateVersion();
+        return ResponseData.successData("版本更新任务下发成功，请稍后刷新网页查看~");
     }
 
     @PostMapping(path = "/getEnableMfa")
@@ -38,7 +45,7 @@ public class SysCfgController {
 
     @PostMapping(path = "/getSysCfg")
     public ResponseData<GetSysCfgRsp> getSysCfg() {
-        return ResponseData.successData(sysService.getSysCfg(),"获取系统配置成功");
+        return ResponseData.successData(sysService.getSysCfg(), "获取系统配置成功");
     }
 
     @PostMapping(path = "/updateSysCfg")
@@ -72,6 +79,16 @@ public class SysCfgController {
 
     @GetMapping(path = "/glance")
     public ResponseData<GetGlanceRsp> glance() {
-        return ResponseData.successData(sysService.glance(),"获取仪表盘数据成功");
+        return ResponseData.successData(sysService.glance(), "获取仪表盘数据成功");
+    }
+
+    @PostMapping(path = "/googleLogin")
+    public ResponseData<LoginRsp> googleLogin(@Validated @RequestBody GoogleLoginParams params) {
+        return ResponseData.successData(sysService.googleLogin(params), "Google登录成功");
+    }
+
+    @PostMapping(path = "/getGoogleClientId")
+    public ResponseData<String> getGoogleClientId() {
+        return ResponseData.successData(sysService.getGoogleClientId(), "获取Google Client ID成功");
     }
 }

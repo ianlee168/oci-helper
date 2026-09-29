@@ -3,18 +3,20 @@ package com.yohann.ocihelper.utils;
 import cn.hutool.core.date.DatePattern;
 import cn.hutool.core.img.ImgUtil;
 import cn.hutool.core.io.FileUtil;
+import cn.hutool.core.io.IoUtil;
 import cn.hutool.core.net.Ipv4Util;
 import cn.hutool.core.util.PageUtil;
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.extra.qrcode.QrCodeUtil;
 import cn.hutool.json.JSONObject;
-import cn.hutool.jwt.JWT;
-import cn.hutool.jwt.JWTUtil;
+
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.warrenstrange.googleauth.GoogleAuthenticator;
 import com.warrenstrange.googleauth.GoogleAuthenticatorKey;
 import com.yohann.ocihelper.bean.entity.OciUser;
 import com.yohann.ocihelper.exception.OciException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import lombok.extern.slf4j.Slf4j;
 import net.lingala.zip4j.ZipFile;
 import net.lingala.zip4j.exception.ZipException;
@@ -38,6 +40,7 @@ import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.TemporalAdjusters;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -66,7 +69,7 @@ public class CommonUtils {
     public static final DateTimeFormatter DATETIME_FMT_NORM = DateTimeFormatter.ofPattern(DatePattern.NORM_DATETIME_PATTERN);
 
     public static final String BEGIN_CREATE_MESSAGE_TEMPLATE =
-            "【开机任务】 用户：[%s] 开始执行开机任务\n\n" +
+            "【开机任务】\n\n用户：[%s] 开始执行开机任务\n" +
                     "时间： %s\n" +
                     "Region： %s\n" +
                     "CPU类型： %s\n" +
@@ -76,31 +79,37 @@ public class CommonUtils {
                     "数量： %s\n" +
                     "root密码： %s";
     public static final String BEGIN_CHANGE_IP_MESSAGE_TEMPLATE =
-            "【更换IP任务】 用户：[%s] 开始执行更换公网IP任务\n\n" +
+            "【更换IP任务】\n\n用户：[%s] 开始执行更换公网IP任务\n" +
                     "时间： %s\n" +
                     "区域： %s\n" +
                     "实例： %s\n" +
                     "当前公网IP： %s";
     public static final String CHANGE_IP_MESSAGE_TEMPLATE =
-            "【更换IP任务】 🎉 用户：[%s] 更换公共IP成功 🎉\n\n" +
+            "【更换IP任务】\n\n🎉 用户：[%s] 更换公共IP成功 🎉\n" +
                     "时间： %s\n" +
                     "区域： %s\n" +
                     "实例： %s\n" +
                     "新的公网IP： %s";
+    public static final String UPDATE_CFG_MESSAGE_TEMPLATE =
+            "【修改配置任务】\n\n🎉 用户：[%s] 修改实例配置成功 🎉\n" +
+                    "时间： %s\n" +
+                    "区域： %s\n" +
+                    "实例： %s\n" +
+                    "新配置： %s 核 / %s GB";
     public static final String TERMINATE_INSTANCE_MESSAGE_TEMPLATE =
-            "【终止实例任务】 用户：[%s] 正在执行终止实例任务 \n\n" +
+            "【终止实例任务】\n\n用户：[%s] 正在执行终止实例任务\n" +
                     "时间： %s\n" +
                     "区域： %s\n" +
                     "请耐心等待，稍后自行刷新详情查看";
 
     public static final String TERMINATE_INSTANCE_CODE_MESSAGE_TEMPLATE =
-            "【验证码】 用户：[%s] 正在执行终止实例任务 \n\n" +
+            "【验证码】\n\n用户：[%s] 正在执行终止实例任务\n" +
                     "时间： %s\n" +
                     "区域： %s\n" +
                     "实例： %s\n" +
                     "Shape： %s\n" +
                     "验证码： %s\n" +
-                    "⭐注意：终止实例后，数据无法恢复，请谨慎操作！！！";
+                    "⭐注意：验证码有效期为5分钟，终止实例后，数据无法恢复，请谨慎操作！！！";
 
     public static <T> List<T> getPage(List<T> dataList, int page, int pageSize) {
         // 获取起始和结束索引
@@ -131,6 +140,15 @@ public class CommonUtils {
             return true;
         }
         return ignoreCase ? StrUtil.containsIgnoreCase(target, keyword) : StrUtil.contains(target, keyword);
+    }
+
+    public static <T> T safeJoin(CompletableFuture<T> future, T defaultValue) {
+        try {
+            return future.join();
+        } catch (Exception e) {
+            log.error("Async task join failed", e);
+            return defaultValue;
+        }
     }
 
     public static boolean isValidCron(String cronExpression) {
@@ -237,6 +255,17 @@ public class CommonUtils {
         return gAuth.authorize(secretKey, userInputOtp);
     }
 
+    /**
+     * Generate current MFA code based on secret key
+     *
+     * @param secretKey MFA secret key
+     * @return current 6-digit MFA code
+     */
+    public static int generateMfaCode(String secretKey) {
+        GoogleAuthenticator gAuth = new GoogleAuthenticator();
+        return gAuth.getTotpPassword(secretKey);
+    }
+
     public static List<OciUser> parseConfigContent(String configContent) throws IOException {
         // 检查并移除 UTF-8 BOM
 //        if (configContent.startsWith("\uFEFF")) {
@@ -325,25 +354,11 @@ public class CommonUtils {
     }
 
     public static String genToken(Map<String, Object> payload, String secretKey) {
-        ZoneId zoneId = ZoneId.systemDefault();
-        Instant instant = LocalDateTime.now().plusHours(3).atZone(zoneId).toInstant();
-
-        return JWT.create()
-                .addHeaders(null)
-                .addPayloads(payload)
-                .setKey(secretKey.getBytes())
-                .setExpiresAt(Date.from(instant))
-                .sign();
+        return JwtUtils.genToken(payload, secretKey, 3);
     }
 
     public static boolean isTokenExpired(String token) {
-        JWT jwt = JWTUtil.parseToken(token);
-
-        Long exp = Long.parseLong(String.valueOf(jwt.getPayload("exp")));
-        if (exp != null) {
-            return exp < System.currentTimeMillis() / 1000; // 将毫秒转换为秒
-        }
-        return true;
+        return JwtUtils.isTokenExpired(token);
     }
 
     public static String dateFmt2String(Date date) {
@@ -470,6 +485,42 @@ public class CommonUtils {
         return prefixLength >= 0 && prefixLength <= 32;
     }
 
+    /**
+     * 判断一个 IPv4 地址是否为私有地址
+     *
+     * @param ip IPv4 地址（如 "192.168.1.10"）
+     * @return true 如果是私有地址，否则 false
+     */
+    public static boolean isPrivateIp(String ip) {
+        try {
+            InetAddress inet = InetAddress.getByName(ip);
+            if (!(inet instanceof java.net.Inet4Address)) {
+                return false; // 只判断 IPv4
+            }
+
+            byte[] addr = inet.getAddress();
+            int firstOctet = addr[0] & 0xFF;
+            int secondOctet = addr[1] & 0xFF;
+
+            // 10.0.0.0/8
+            if (firstOctet == 10) {
+                return true;
+            }
+            // 172.16.0.0/12
+            if (firstOctet == 172 && (secondOctet >= 16 && secondOctet <= 31)) {
+                return true;
+            }
+            // 192.168.0.0/16
+            if (firstOctet == 192 && secondOctet == 168) {
+                return true;
+            }
+
+            return false;
+        } catch (UnknownHostException e) {
+            return false;
+        }
+    }
+
     public static <T> Page<T> buildPage(List<T> entities, long size, long current, long total) {
         Page<T> page = new Page<>();
         page.setRecords(entities);
@@ -589,6 +640,72 @@ public class CommonUtils {
         return rst;
     }
 
+    public static String getClientIP(HttpServletRequest request) {
+        String ip = request.getHeader("X-Forwarded-For");
+        if (ip != null && !ip.isEmpty() && !"unknown".equalsIgnoreCase(ip)) {
+            return ip.split(",")[0].trim();
+        }
+        ip = request.getHeader("Proxy-Client-IP");
+        if (ip != null && !ip.isEmpty() && !"unknown".equalsIgnoreCase(ip)) {
+            return ip;
+        }
+        ip = request.getHeader("WL-Proxy-Client-IP");
+        if (ip != null && !ip.isEmpty() && !"unknown".equalsIgnoreCase(ip)) {
+            return ip;
+        }
+        ip = request.getRemoteAddr();
+        return ip;
+    }
+
+    public static void writeResponse(HttpServletResponse response,
+                                     InputStream inputStream, String contentType, String fileName) throws IOException {
+
+        response.setContentType(contentType);
+        response.setHeader("Content-Disposition", "attachment; filename*=UTF-8''" + fileName);
+
+        try (OutputStream out = response.getOutputStream()) {
+            IoUtil.copy(inputStream, out);
+        }
+    }
+
+    /**
+     * Generates a cryptographically random password suitable for OCI Identity Domains.
+     * Format: 2 uppercase + 4 lowercase + 2 digits + 2 special chars + 2 any, then shuffled.
+     * Length is 12, satisfies OCI's default password policy.
+     */
+    public static String generateRandomPassword() {
+        String upper = "ABCDEFGHJKLMNPQRSTUVWXYZ";
+        String lower = "abcdefghjkmnpqrstuvwxyz";
+        String digits = "23456789";
+        String special = "@#$%";
+        String all = upper + lower + digits + special;
+
+        java.security.SecureRandom rng = new java.security.SecureRandom();
+        StringBuilder sb = new StringBuilder(12);
+        sb.append(upper.charAt(rng.nextInt(upper.length())));
+        sb.append(upper.charAt(rng.nextInt(upper.length())));
+        sb.append(lower.charAt(rng.nextInt(lower.length())));
+        sb.append(lower.charAt(rng.nextInt(lower.length())));
+        sb.append(lower.charAt(rng.nextInt(lower.length())));
+        sb.append(lower.charAt(rng.nextInt(lower.length())));
+        sb.append(digits.charAt(rng.nextInt(digits.length())));
+        sb.append(digits.charAt(rng.nextInt(digits.length())));
+        sb.append(special.charAt(rng.nextInt(special.length())));
+        sb.append(special.charAt(rng.nextInt(special.length())));
+        sb.append(all.charAt(rng.nextInt(all.length())));
+        sb.append(all.charAt(rng.nextInt(all.length())));
+        List<Character> chars = new ArrayList<>();
+        for (char c : sb.toString().toCharArray()) {
+            chars.add(c);
+        }
+        Collections.shuffle(chars, rng);
+        StringBuilder result = new StringBuilder();
+        for (char c : chars) {
+            result.append(c);
+        }
+        return result.toString();
+    }
+
     public static String getPwdShell(String passwd) {
         return "#cloud-config\n" +
                 "ssh_pwauth: yes\n" +
@@ -639,7 +756,7 @@ public class CommonUtils {
                 "      \n" +
                 "      # Set up warning message\n" +
                 "      {\n" +
-                "        echo \"🎉 欢迎使用Y探长~ 🎉\"\n" +
+                "        echo \"🎉 欢迎使用 Y 探长~ 🎉\"\n" +
                 "        echo \"Source code address: https://github.com/Yohann0617/oci-helper\"\n" +
                 "      } | tee /etc/motd\n" +
                 "      \n" +

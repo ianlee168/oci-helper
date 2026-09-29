@@ -17,6 +17,15 @@ public class OciUserListRsp {
     private String username;
     private String tenantName;
     private String region;
+    private String regionName;
     private String createTime;
     private Integer enableCreate;
+    private String planType;
+    /** 配置专属代理地址 */
+    private String proxy;
+    /**
+     * Account status: "ACTIVE" / "INACTIVE" / null
+     * 账户状态：ACTIVE=活跃，INACTIVE=失效，null=未检测
+     */
+    private String accountStatus;
 }
